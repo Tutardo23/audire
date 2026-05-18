@@ -1,0 +1,1498 @@
+diff --git a/src/app/actions.ts b/src/app/actions.ts
+index 618f65095b613c5bf7253081fbcd27944e5c128e..38813234ffe58c81fa885738a460708276045739 100644
+--- a/src/app/actions.ts
++++ b/src/app/actions.ts
+@@ -159,50 +159,67 @@ const TagsSchema = z.preprocess((v) => {
+   return [];
+ }, z.array(z.string().min(1).max(40)).max(20));
+ 
+ // --------------------
+ // ZOD (VALIDACIÓN REAL)
+ // --------------------
+ const EncuestaSchema = z
+   .object({
+     colegio: z.preprocess(toOptTrimmedString, z.string().min(1).max(255).default("APDES")),
+     curso: z.preprocess(toOptTrimmedString, z.string().max(120).default("-")),
+     polo: z.preprocess(toOptTrimmedString, z.string().max(120).default("General")),
+     sexo: z.preprocess(toOptTrimmedString, z.string().max(60).default("N/A")),
+     nombre: z.preprocess(toOptTrimmedString, z.string().max(120).optional()),
+     apellido: z.preprocess(toOptTrimmedString, z.string().max(120).optional()),
+     score: z.coerce.number().int().min(0).max(10),
+     positive: z.preprocess((v) => String(v ?? "").slice(0, 6000), z.string().default("")),
+     improvement: z.preprocess((v) => String(v ?? "").slice(0, 6000), z.string().default("")),
+     tags: TagsSchema.default([]),
+   })
+   .passthrough();
+ 
+ const BatchSchema = z.array(EncuestaSchema).min(1).max(20000);
+ 
+ // ✅ Validador de UUID reutilizable
+ const UUIDSchema = z.string().uuid("ID de proyecto inválido");
++const ProjectThemesSchema = z.array(
++  z.object({
++    id: z.string().min(1).max(120),
++    keywords: z.array(z.string().min(1).max(80)).min(1).max(60),
++  })
++);
++
++async function ensureProjectThemesTable() {
++  await sql`
++    CREATE TABLE IF NOT EXISTS project_themes (
++      project_id uuid PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
++      themes jsonb NOT NULL,
++      updated_by text,
++      updated_at timestamptz NOT NULL DEFAULT now()
++    )
++  `;
++}
+ 
+ // --------------------
+ // PROYECTOS
+ // --------------------
+ export async function listarProyectosDB() {
+   const userId = await requireUserId();
+   const scope = await getAccessScope();
+   if (scope.role === "admin") {
+     if (scope.hasProjectScope) {
+       if (scope.projectIds.length === 0) return [];
+       return await sql`
+         SELECT id, nombre, descripcion, creado_at
+         FROM projects
+         WHERE id = ANY(${scope.projectIds}::uuid[])
+         ORDER BY creado_at DESC
+       `;
+     }
+     return await sql`
+       SELECT id, nombre, descripcion, creado_at
+       FROM projects
+       ORDER BY creado_at DESC
+     `;
+   }
+   if (scope.projectIds.length > 0) {
+     return await sql`
+@@ -546,25 +563,61 @@ export async function compararProyectosDB(projectIdA: string, projectIdB: string
+   return {
+     a: calcStats(filteredRowsProjectA as any[], projectIdA, (projA as any[])[0]?.nombre ?? "Proyecto A"),
+     b: calcStats(filteredRowsProjectB as any[], projectIdB, (projB as any[])[0]?.nombre ?? "Proyecto B"),
+   };
+ }
+ 
+ // ─────────────────────────────────────────────
+ // RENOMBRAR PROYECTO
+ // ─────────────────────────────────────────────
+ export async function renombrarProyectoDB(projectId: string, nuevoNombre: string, nuevaDescripcion?: string) {
+   "use server";
+   const userId = await requireUserId();
+   if (!projectId || !/^[0-9a-f-]{36}$/.test(projectId)) throw new Error("UUID inválido");
+   const nombre = nuevoNombre.trim().slice(0, 100);
+   if (!nombre) throw new Error("El nombre no puede estar vacío");
+ 
+   await sql`
+     UPDATE projects
+     SET nombre = ${nombre},
+         descripcion = ${nuevaDescripcion?.trim() ?? null}
+     WHERE id = ${projectId}::uuid
+       AND usuario_id = ${userId}
+   `;
+   return { ok: true };
+ }
++
++export async function obtenerTemasProyectoDB(projectId: string) {
++  const userId = await requireUserId();
++  UUIDSchema.parse(projectId);
++  const scope = await getAccessScope();
++  await assertProjectAccess(projectId, userId, scope);
++  await ensureProjectThemesTable();
++  const rows = await sql`SELECT themes FROM project_themes WHERE project_id = ${projectId}::uuid LIMIT 1`;
++  const raw = (rows?.[0] as { themes?: unknown } | undefined)?.themes;
++  const parsed = ProjectThemesSchema.safeParse(raw);
++  return parsed.success ? parsed.data : [];
++}
++
++export async function guardarTemasProyectoDB(
++  projectId: string,
++  themesUnsafe: Array<{ id: string; keywords: string[] }>
++) {
++  const userId = await requireUserId();
++  UUIDSchema.parse(projectId);
++  const scope = await getAccessScope();
++  await assertProjectAccess(projectId, userId, scope);
++  const parsed = ProjectThemesSchema.safeParse(themesUnsafe);
++  if (!parsed.success) throw new Error("Formato de temas inválido");
++  await ensureProjectThemesTable();
++  const themes = parsed.data.map((t) => ({
++    id: String(t.id).trim(),
++    keywords: t.keywords.map((x) => String(x).trim()).filter(Boolean),
++  })).filter((t) => t.id && t.keywords.length > 0);
++  await sql`
++    INSERT INTO project_themes (project_id, themes, updated_by, updated_at)
++    VALUES (${projectId}::uuid, ${JSON.stringify(themes)}::jsonb, ${userId}, now())
++    ON CONFLICT (project_id)
++    DO UPDATE SET themes = EXCLUDED.themes, updated_by = EXCLUDED.updated_by, updated_at = now()
++  `;
++  return { ok: true };
++}
+diff --git a/src/app/api/families/analyze/route.ts b/src/app/api/families/analyze/route.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..178d5d1556ff5baf9118ae03619e6c83bf7158f7
+--- /dev/null
++++ b/src/app/api/families/analyze/route.ts
+@@ -0,0 +1,53 @@
++import { NextResponse } from "next/server";
++import { SHEETS_BY_GROUP, type FamilyGroup } from "../../../lib/familyImportConfig";
++
++export async function POST(req: Request) {
++  try {
++    const form = await req.formData();
++    const group = String(form.get("group") || "") as FamilyGroup;
++    const file = form.get("file");
++    if (!group || !SHEETS_BY_GROUP[group]) return NextResponse.json({ error: "Grupo inválido." }, { status: 400 });
++    if (!(file instanceof File)) return NextResponse.json({ error: "Archivo inválido." }, { status: 400 });
++
++    let XLSX: any;
++    try {
++      XLSX = await import("xlsx");
++    } catch {
++      return NextResponse.json({ error: "Falta dependencia xlsx en el servidor." }, { status: 500 });
++    }
++
++    const ab = await file.arrayBuffer();
++    const wb = XLSX.read(Buffer.from(ab), { type: "buffer" });
++    const actualSheets = wb.SheetNames;
++    const expected = SHEETS_BY_GROUP[group];
++
++    const details = actualSheets.map((name: string) => {
++      const ws = wb.Sheets[name];
++      const rows = XLSX.utils.sheet_to_json(ws, { defval: null });
++      return { hoja: name, filasDetectadas: rows.length };
++    });
++
++    const missing = expected.filter((s: { hoja: string }) => !actualSheets.includes(s.hoja)).map((s: { hoja: string }) => s.hoja);
++    const unexpected = actualSheets.filter((s: string) => !expected.some((e: { hoja: string }) => e.hoja === s));
++    const matched = expected
++      .filter((s: { hoja: string }) => actualSheets.includes(s.hoja))
++      .map((s: { hoja: string; filas: number }) => {
++        const got = details.find((d: { hoja: string; filasDetectadas: number }) => d.hoja === s.hoja)?.filasDetectadas || 0;
++        return { hoja: s.hoja, esperado: s.filas, detectado: got, delta: got - s.filas };
++      });
++
++    return NextResponse.json({
++      ok: true,
++      resumen: {
++        hojasDetectadas: actualSheets.length,
++        hojasEsperadas: expected.length,
++        faltantes: missing,
++        inesperadas: unexpected,
++      },
++      details,
++      matched,
++    });
++  } catch {
++    return NextResponse.json({ error: "No se pudo analizar el archivo." }, { status: 500 });
++  }
++}
+diff --git a/src/app/dashboard/families/page.tsx b/src/app/dashboard/families/page.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..4ccbcc59f33b808b7b1fb4222e8166310cb10c70
+--- /dev/null
++++ b/src/app/dashboard/families/page.tsx
+@@ -0,0 +1,197 @@
++"use client";
++
++import { useMemo, useState, useEffect } from "react";
++import Link from "next/link";
++import { ArrowLeft, ArrowRight, CalendarBlank, FileArrowUp, FileXls, Users } from "phosphor-react";
++import { listarProyectosDB } from "../../actions";
++import { SHEETS_BY_GROUP, type FamilyGroup, type SheetSpec } from "../../lib/familyImportConfig";
++
++type Project = { id: string; nombre: string; descripcion: string | null; creado_at: string };
++export default function FamiliesImportPage() {
++  const [file, setFile] = useState<File | null>(null);
++  const [anio, setAnio] = useState(String(new Date().getFullYear()));
++  const [tipo, setTipo] = useState<FamilyGroup>("varones");
++  const [projectId, setProjectId] = useState("");
++  const [projects, setProjects] = useState<Project[]>([]);
++  const [isAnalyzed, setIsAnalyzed] = useState(false);
++  const [loadingProjects, setLoadingProjects] = useState(true);
++  const [analyzing, setAnalyzing] = useState(false);
++  const [analyzeError, setAnalyzeError] = useState("");
++  const [analysisResult, setAnalysisResult] = useState<any | null>(null);
++
++  useEffect(() => {
++    listarProyectosDB()
++      .then((rows) => setProjects(Array.isArray(rows) ? (rows as Project[]) : []))
++      .finally(() => setLoadingProjects(false));
++  }, []);
++
++  const yearProjects = useMemo(() => {
++    return projects.filter((p) => String(p.nombre || "").includes(anio));
++  }, [projects, anio]);
++
++  const selectedProject = yearProjects.find((p) => p.id === projectId);
++  const expectedSheets = SHEETS_BY_GROUP[tipo];
++  const totalExpectedRows = expectedSheets.reduce((acc: number, s: SheetSpec) => acc + s.filas, 0);
++  const summary = useMemo(() => {
++    if (!file) return null;
++    const mb = (file.size / 1024 / 1024).toFixed(2);
++    return {
++      filename: file.name,
++      sizeMb: mb,
++      recomendaciones: [
++        "Subir por grupo: varones, mujeres o jardines (no mezclado).",
++        "Revisar que el proyecto elegido corresponda al mismo año.",
++        "Confirmar importación recién después del análisis.",
++      ],
++    };
++  }, [file]);
++
++  const handleAnalyze = () => {
++    if (!file || !projectId) return;
++    setAnalyzing(true);
++    setAnalyzeError("");
++    setAnalysisResult(null);
++    const fd = new FormData();
++    fd.set("group", tipo);
++    fd.set("file", file);
++    fetch("/api/families/analyze", { method: "POST", body: fd })
++      .then(async (res) => {
++        const data = await res.json();
++        if (!res.ok) throw new Error(data?.error || "Error al analizar.");
++        setAnalysisResult(data);
++        setIsAnalyzed(true);
++      })
++      .catch((e) => {
++        setIsAnalyzed(false);
++        setAnalyzeError(String(e?.message || "No se pudo analizar el archivo."));
++      })
++      .finally(() => setAnalyzing(false));
++  };
++
++  const readyToConfirm = Boolean(file && projectId && isAnalyzed);
++
++  return (
++    <div className="min-h-screen bg-[#F4F7FB] p-6 font-sans">
++      <div className="mx-auto w-full max-w-4xl">
++        <Link href="/dashboard" className="mb-4 inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-bold text-slate-700 hover:bg-slate-50">
++          <ArrowLeft size={16} weight="bold" /> Volver al Hub
++        </Link>
++
++        <div className="rounded-3xl border border-gray-100 bg-white p-8 shadow-sm">
++          <div className="mb-8">
++            <h2 className="text-2xl font-semibold tracking-tight text-gray-900">Importar Padrón Audire</h2>
++            <p className="mt-1 text-sm text-gray-500">Flujo seguro: Analizar primero, Confirmar importación después.</p>
++          </div>
++
++          <div className="mb-8 grid grid-cols-1 gap-6 md:grid-cols-2">
++            <div className="space-y-2">
++              <label className="flex items-center gap-2 text-sm font-medium text-gray-700">
++                <CalendarBlank size={18} weight="bold" className="text-blue-600" />
++                Año académico
++              </label>
++              <select value={anio} onChange={(e) => { setAnio(e.target.value); setProjectId(""); }} className="w-full rounded-lg border border-gray-200 px-4 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500">
++                {["2024", "2025", "2026", "2027"].map((y) => <option key={y} value={y}>{y}</option>)}
++              </select>
++            </div>
++
++            <div className="space-y-2">
++              <label className="flex items-center gap-2 text-sm font-medium text-gray-700">
++                <Users size={18} weight="bold" className="text-blue-600" />
++                Grupo de colegios
++              </label>
++              <select value={tipo} onChange={(e) => setTipo(e.target.value as "varones" | "mujeres" | "jardines")} className="w-full rounded-lg border border-gray-200 px-4 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500">
++                <option value="varones">Varones</option>
++                <option value="mujeres">Mujeres</option>
++                <option value="jardines">Jardines</option>
++              </select>
++            </div>
++
++            <div className="space-y-2 md:col-span-2">
++              <label className="text-sm font-medium text-gray-700">Proyecto (filtrado por año)</label>
++              <select value={projectId} onChange={(e) => setProjectId(e.target.value)} className="w-full rounded-lg border border-gray-200 px-4 py-2.5 text-sm outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500">
++                <option value="">{loadingProjects ? "Cargando proyectos..." : "Seleccionar proyecto..."}</option>
++                {yearProjects.map((p) => <option key={p.id} value={p.id}>{p.nombre}</option>)}
++              </select>
++              {!loadingProjects && yearProjects.length === 0 && (
++                <p className="text-xs font-semibold text-amber-600">No hay proyectos con el año {anio} en el nombre.</p>
++              )}
++            </div>
++          </div>
++
++          <div className="group relative flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed border-gray-200 bg-gray-50 p-10 transition-colors hover:bg-gray-100/50">
++            <input type="file" accept=".xlsx,.xls" onChange={(e) => setFile(e.target.files?.[0] || null)} className="absolute inset-0 h-full w-full cursor-pointer opacity-0" />
++            {file ? (
++              <div className="text-center">
++                <div className="mb-3 inline-flex rounded-full bg-green-100 p-3 text-green-600"><FileXls size={32} weight="fill" /></div>
++                <p className="text-sm font-medium text-gray-900">{file.name}</p>
++                <p className="mt-1 text-xs text-gray-500">{(file.size / 1024 / 1024).toFixed(2)} MB</p>
++              </div>
++            ) : (
++              <div className="text-center">
++                <div className="mb-4 inline-flex rounded-full bg-blue-50 p-4 text-blue-600 transition-transform group-hover:scale-105"><FileArrowUp size={32} weight="duotone" /></div>
++                <p className="text-sm font-medium text-gray-900">Hacé clic o arrastrá el Excel</p>
++                <p className="mt-1 text-xs text-gray-500">Solo .xlsx / .xls</p>
++              </div>
++            )}
++          </div>
++
++          {summary && (
++            <div className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-4">
++              <p className="text-xs font-black uppercase tracking-widest text-slate-500">Resumen de análisis previo</p>
++              <p className="mt-2 text-sm font-semibold text-slate-700">Archivo: {summary.filename} ({summary.sizeMb} MB)</p>
++              <p className="mt-1 text-sm font-semibold text-slate-700">Año: {anio} • Grupo: {tipo} • Proyecto: {selectedProject?.nombre || "Sin seleccionar"}</p>
++              <ul className="mt-3 list-disc space-y-1 pl-5 text-xs font-semibold text-slate-600">
++                {summary.recomendaciones.map((r) => <li key={r}>{r}</li>)}
++              </ul>
++            </div>
++          )}
++
++          <div className="mt-6 rounded-2xl border border-indigo-200 bg-indigo-50/60 p-4">
++            <p className="text-xs font-black uppercase tracking-widest text-indigo-700">Control esperado para grupo {tipo}</p>
++            <p className="mt-1 text-xs font-semibold text-indigo-700">
++              Hojas esperadas: {expectedSheets.length} • Filas de referencia: {totalExpectedRows.toLocaleString("es-AR")}
++            </p>
++            <div className="mt-3 grid gap-2 md:grid-cols-2">
++              {expectedSheets.map((sheet: SheetSpec) => (
++                <div key={sheet.hoja} className="rounded-xl border border-indigo-100 bg-white p-3">
++                  <p className="text-xs font-black text-slate-800">{sheet.hoja}</p>
++                  <p className="mt-1 text-[11px] font-semibold text-slate-600">
++                    Filas: {sheet.filas} • Encabezado en fila {sheet.encabezadoFila}
++                  </p>
++                  {sheet.observacion && (
++                    <p className="mt-1 text-[11px] font-semibold text-amber-700">{sheet.observacion}</p>
++                  )}
++                </div>
++              ))}
++            </div>
++          </div>
++
++          <div className="mt-8 flex flex-wrap justify-end gap-3">
++            <button onClick={handleAnalyze} disabled={!file || !projectId || analyzing} className={`rounded-lg px-6 py-2.5 text-sm font-medium transition-all ${file && projectId ? "bg-blue-600 text-white shadow-md hover:bg-blue-700" : "cursor-not-allowed bg-gray-100 text-gray-400"}`}>
++              {analyzing ? "Analizando..." : "Analizar archivo"}
++            </button>
++            <button disabled={!readyToConfirm} className={`inline-flex items-center gap-2 rounded-lg px-6 py-2.5 text-sm font-medium transition-all ${readyToConfirm ? "bg-emerald-600 text-white shadow-md hover:bg-emerald-700" : "cursor-not-allowed bg-gray-100 text-gray-400"}`}>
++              Confirmar importación
++              <ArrowRight size={16} weight="bold" />
++            </button>
++          </div>
++          {analyzeError && <p className="mt-3 text-sm font-bold text-red-600">{analyzeError}</p>}
++          {analysisResult?.ok && (
++            <div className="mt-6 rounded-2xl border border-emerald-200 bg-emerald-50/60 p-4">
++              <p className="text-xs font-black uppercase tracking-widest text-emerald-700">Resultado del análisis real</p>
++              <p className="mt-1 text-xs font-semibold text-emerald-700">
++                Hojas detectadas: {analysisResult.resumen.hojasDetectadas} / esperadas: {analysisResult.resumen.hojasEsperadas}
++              </p>
++              {analysisResult.resumen.faltantes.length > 0 && (
++                <p className="mt-2 text-xs font-semibold text-red-600">Faltan hojas: {analysisResult.resumen.faltantes.join(", ")}</p>
++              )}
++              {analysisResult.resumen.inesperadas.length > 0 && (
++                <p className="mt-1 text-xs font-semibold text-amber-700">Hojas inesperadas: {analysisResult.resumen.inesperadas.join(", ")}</p>
++              )}
++            </div>
++          )}
++        </div>
++      </div>
++    </div>
++  );
++}
+diff --git a/src/app/dashboard/page.tsx b/src/app/dashboard/page.tsx
+index 2cb057fa50e0398426552e017421069db2d060e7..808dff60a443e2939039e434287bfa467376da8c 100644
+--- a/src/app/dashboard/page.tsx
++++ b/src/app/dashboard/page.tsx
+@@ -199,50 +199,54 @@ export default function DashboardHubPage() {
+                       Administrar perfiles
+                     </Link>
+                   )}
+                   <SignOutButton>
+                     <button className="flex w-full items-center justify-center rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-black text-white transition-colors hover:bg-slate-800">
+                       Cerrar sesión
+                     </button>
+                   </SignOutButton>
+                 </div>
+               )}
+             </div>
+           </div>
+         </div>
+       </header>
+ 
+       <main className="mx-auto mt-12 w-full max-w-[1500px] px-6">
+         <div className="mb-10 flex flex-col md:flex-row md:items-end justify-between gap-4">
+           <div className="flex flex-col gap-2">
+             <h1 className="font-display text-4xl font-black tracking-tight text-slate-900">
+               Tus Proyectos
+             </h1>
+             <p className="text-sm font-medium text-slate-500 max-w-xl">
+               Seleccioná un espacio de trabajo para acceder a su panel de control, ver sus encuestas y realizar análisis avanzados.
+             </p>
+           </div>
++          <Link href="/dashboard/families" className="inline-flex items-center gap-2 rounded-2xl border border-blue-200 bg-blue-50 px-4 py-2 text-sm font-black text-blue-700 hover:bg-blue-100">
++            Universo Familia
++            <ArrowRight size={16} weight="bold" />
++          </Link>
+ 
+           {/* ── Botón Comparar (SOLO VISIBLE PARA ADMINS) ────────────────────────────────── */}
+           {isAdmin && projects.length >= 2 && (
+             <div className="flex items-center gap-3">
+               {compareMode ? (
+                 <>
+                   <span className="text-xs font-bold text-slate-500">
+                     {selectedToCompare.length === 0
+                       ? "Elegí 2 proyectos"
+                       : selectedToCompare.length === 1
+                       ? "Elegí 1 más"
+                       : "¡Listo!"}
+                   </span>
+                   {compareUrl ? (
+                     <Link
+                       href={compareUrl}
+                       className="flex items-center gap-2 rounded-2xl bg-blue-600 px-5 py-2.5 text-sm font-black text-white transition-all hover:bg-blue-700 hover:shadow-lg hover:shadow-blue-600/25 active:scale-[0.98]"
+                     >
+                       Ver comparación <ArrowRight size={16} weight="bold" />
+                     </Link>
+                   ) : null}
+                   <button
+                     onClick={() => { setCompareMode(false); setSelectedToCompare([]); }}
+                     className="flex items-center gap-1.5 rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-bold text-slate-500 hover:bg-slate-50 transition-all"
+                   >
+diff --git a/src/app/dashboard/surveys/page.tsx b/src/app/dashboard/surveys/page.tsx
+index 96f74ebd0965cf32201f6de578ba34b24cd5f2a9..b149a8286cc57943d7fba21a7c44adcc7307aa1e 100644
+--- a/src/app/dashboard/surveys/page.tsx
++++ b/src/app/dashboard/surveys/page.tsx
+@@ -701,62 +701,64 @@ function AnalyticsDashboardLive() {
+           </Link>
+         </div>
+       </div>
+     );
+   }
+ 
+   if (isLoading) return <SurveysFallback />;
+ 
+   return (
+     <div className="min-h-screen overflow-x-hidden bg-[#F4F7FB] pb-12 font-sans">
+       <Header />
+       <main className="mx-auto mt-8 w-full max-w-[1600px] px-6">
+         {viewMode === "director" ? (
+           <DirectorDashboard
+             stats={directorStats}
+             filteredResponses={viewMode === "director" ? directorStats.schoolData : filteredResponses}
+             directorCommentLimit={directorCommentLimit}
+             setDirectorCommentLimit={setDirectorCommentLimit}
+             directorTopic={directorTopic}
+             setDirectorTopic={setDirectorTopic}
+             activeSchool={activeSchool}
+             regionalRows={npsComparisonRows}
+             fixedPolo={scopedFilters.polo}
+             userId={user?.id}
+             canEditThemes={isAdmin}
++            projectId={projectId}
+           />
+         ) : (
+           <TeamDashboard 
+             stats={stats}
+             filteredResponses={filteredResponses}
+             searchTerm={searchTerm}
+             setSearchTerm={setSearchTerm}
+             filterType={filterType}
+             setFilterType={setFilterType}
+             currentPage={currentPage}
+             setCurrentPage={setCurrentPage}
+             downloadCSV={downloadCSV}
++            projectId={projectId}
+           />
+         )}
+       </main>
+ 
+       {/* Menú lateral */}
+       {isMenuOpen && (
+         <div className="fixed inset-0 z-50">
+           <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" onClick={() => setIsMenuOpen(false)} />
+           <div className="absolute right-0 top-0 h-full w-full max-w-[420px] overflow-y-auto border-l border-white bg-white/90 p-6 shadow-2xl backdrop-blur-2xl">
+             <div className="mb-6 flex items-start justify-between gap-3">
+               <div>
+                 <p className="text-[10px] font-black uppercase tracking-widest text-blue-600">APDES</p>
+                 <h3 className="font-display text-2xl font-black text-slate-900">Menú de Gestión</h3>
+               </div>
+               <button onClick={() => setIsMenuOpen(false)} className="flex items-center gap-2 rounded-xl bg-white border border-slate-200 px-3 py-2 text-sm font-bold text-slate-700 transition-all hover:bg-slate-50 shadow-sm"><X size={15} weight="bold" /> Cerrar</button>
+             </div>
+             
+             <Link href="/dashboard" onClick={() => setIsMenuOpen(false)} className="mb-4 flex items-center justify-center gap-2 rounded-2xl bg-blue-600 text-white p-4 text-sm font-black shadow-md shadow-blue-500/30 transition-all hover:bg-blue-700 active:scale-95"><ArrowLeft size={18} weight="bold" /> Volver al Hub Principal</Link>
+             
+             {isAdmin && (
+               <div className="mb-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                 <div className="flex items-center justify-between gap-3">
+                   <div><h4 className="text-sm font-black text-slate-900">Añadir Respuestas (CSV)</h4></div>
+                   <label className="flex cursor-pointer items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-xs font-bold text-white transition-all active:scale-95 hover:bg-emerald-700 shadow-sm shadow-emerald-500/30"><UploadSimple size={16} weight="bold" /> Subir archivo <input type="file" accept=".csv" onChange={handleFileUpload} className="hidden" /></label>
+                 </div>
+diff --git a/src/app/lib/familyImportConfig.ts b/src/app/lib/familyImportConfig.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..6c34057baf7620851d4872c9f1def411e8bd376d
+--- /dev/null
++++ b/src/app/lib/familyImportConfig.ts
+@@ -0,0 +1,33 @@
++export type FamilyGroup = "varones" | "mujeres" | "jardines";
++export type SheetSpec = { hoja: string; filas: number; encabezadoFila: number; observacion?: string };
++
++export const SHEETS_BY_GROUP: Record<FamilyGroup, SheetSpec[]> = {
++  varones: [
++    { hoja: "Polo Tucumán - Pucará", filas: 680, encabezadoFila: 1, observacion: "Nivel viene en nombre del colegio; B funciona como curso." },
++    { hoja: "Polo Córdoba - Cinco Rios", filas: 457, encabezadoFila: 1 },
++    { hoja: "Polo Rosario - Los Arroyos", filas: 374, encabezadoFila: 1 },
++    { hoja: "Polo La Plata - BDP", filas: 314, encabezadoFila: 1 },
++    { hoja: "Polo Pilar - Los Caminos", filas: 176, encabezadoFila: 1 },
++    { hoja: "Polo Mendoza - Los Olivos", filas: 364, encabezadoFila: 1 },
++    { hoja: "Polo Buenos Aires - Los Molinos", filas: 817, encabezadoFila: 1 },
++  ],
++  mujeres: [
++    { hoja: "Polo Tucumán - Los Cerros", filas: 735, encabezadoFila: 1, observacion: "Nivel también en nombre oficial; C funciona como curso." },
++    { hoja: "Polo Córdoba - El Torreón", filas: 520, encabezadoFila: 1, observacion: "B contiene nivel aunque encabezado no coincida." },
++    { hoja: "Polo Rosario - Mirasoles", filas: 378, encabezadoFila: 1 },
++    { hoja: "Polo Buenos Aires - El Buen Ayr", filas: 656, encabezadoFila: 1, observacion: "B sin encabezado: nivel; C funciona como curso." },
++    { hoja: "Polo Mendoza - Portezuelo", filas: 283, encabezadoFila: 1 },
++    { hoja: "Polo La Plata - Crisol", filas: 179, encabezadoFila: 1 },
++    { hoja: "Polo Pilar - Los Candiles", filas: 376, encabezadoFila: 2 },
++  ],
++  jardines: [
++    { hoja: "Polo Tucumán - Los Cerritos", filas: 302, encabezadoFila: 1 },
++    { hoja: "Polo Córdoba - Jardín Torreón d", filas: 212, encabezadoFila: 1 },
++    { hoja: "Polo Rosario - Los Senderos", filas: 999, encabezadoFila: 1 },
++    { hoja: "Polo Buenos Aires - Buen Molino", filas: 198, encabezadoFila: 1, observacion: "Sin nivel separado; B es curso." },
++    { hoja: "Polo Mendoza - Platero", filas: 222, encabezadoFila: 1 },
++    { hoja: "Polo La Plata - Jardín Crisol", filas: 174, encabezadoFila: 1, observacion: "A sin encabezado formal, pero contiene colegio." },
++    { hoja: "Polo Pilar - Jardín Cauquén", filas: 328, encabezadoFila: 1, observacion: "A/B/C/D sin encabezados formales." },
++  ],
++};
++
+diff --git a/src/components/DirectorDashboard.tsx b/src/components/DirectorDashboard.tsx
+index 6c92444c610346aa38e145bcffe78557510b261f..b21228a1a5444be162d9445c7f81511424eff60b 100644
+--- a/src/components/DirectorDashboard.tsx
++++ b/src/components/DirectorDashboard.tsx
+@@ -14,51 +14,51 @@ import {
+   Heart,
+   Users,
+   Minus,
+   ThumbsUp,
+   ArrowsClockwise,
+   MagnifyingGlass,
+   CaretLeft,
+   CaretRight,
+   Plus,
+   Trash,
+   PencilSimple,
+   Info,
+ } from "phosphor-react";
+ import {
+   ResponsiveContainer,
+   BarChart,
+   Bar,
+   XAxis,
+   YAxis,
+   Tooltip,
+   Cell,
+   CartesianGrid,
+ } from "recharts";
+ 
+ // Ajustá esta ruta dependiendo de dónde esté tu carpeta actions
+-import { obtenerEncuestasDB, listarProyectosDB } from "../app/actions";
++import { obtenerEncuestasDB, listarProyectosDB, obtenerTemasProyectoDB, guardarTemasProyectoDB } from "../app/actions";
+ 
+ // ─────────────────────────────────────────────
+ // TIPOS
+ // ─────────────────────────────────────────────
+ type DirectorTopic = "Promotor" | "Satisfecho" | "Insatisfecho";
+ type DirectorCustomTheme = { id: string; keywords: string[] };
+ 
+ export type SurveyRow = {
+   id: string;
+   date: string;
+   nombre: string;
+   apellido: string;
+   colegio: string;
+   curso: string;
+   polo: string;
+   sexo: string;
+   score: number;
+   type: "Promotor" | "Satisfecho" | "Insatisfecho";
+   positive: string;
+   improvement: string;
+   positiveTags: string[];
+   improvementTags: string[];
+   risk: boolean;
+   riskLevel: "Ninguno" | "Sensible" | "Prioritario";
+   riskWords: string[];
+@@ -236,99 +236,94 @@ function HelpTip({ title, body }: { title: string; body: string }) {
+       {open && (
+         <div className="absolute right-0 top-8 z-20 w-72 rounded-xl border border-slate-200 bg-white p-3 text-left shadow-xl">
+           <p className="text-xs font-black text-slate-800">{title}</p>
+           <p className="mt-1 text-xs font-semibold leading-relaxed text-slate-600">{body}</p>
+         </div>
+       )}
+     </div>
+   );
+ }
+ 
+ // ─────────────────────────────────────────────
+ // DASHBOARD DEL DIRECTOR
+ // ─────────────────────────────────────────────
+ type DirectorDashboardProps = {
+   stats: any;
+   filteredResponses: SurveyRow[];
+   directorCommentLimit: number;
+   setDirectorCommentLimit: (value: number) => void;
+   directorTopic: DirectorTopic;
+   setDirectorTopic: (value: DirectorTopic) => void;
+   activeSchool: string;
+   regionalRows?: SurveyRow[];
+   fixedPolo?: string;
+   userId?: string;
+   canEditThemes?: boolean;
++  projectId?: string;
+ };
+ 
+ export default function DirectorDashboard({
+   stats,
+   filteredResponses,
+   directorCommentLimit,
+   setDirectorCommentLimit,
+   directorTopic,
+   setDirectorTopic,
+   activeSchool,
+   regionalRows,
+   fixedPolo,
+   userId,
+   canEditThemes = false,
++  projectId,
+ }: DirectorDashboardProps) {
+   const [commentTheme, setCommentTheme] = useState<string>("Todos");
+   const [commentRefreshCounter, setCommentRefreshCounter] = useState(0);
+-  const [chartPolo, setChartPolo] = useState<string>(fixedPolo || "Todos los polos");
+   const [allThemes, setAllThemes] = useState<DirectorCustomTheme[]>(THEMES_LIST);
+   const [isCreatingTheme, setIsCreatingTheme] = useState(false);
+   const [newThemeName, setNewThemeName] = useState("");
+   const [newThemeKeywords, setNewThemeKeywords] = useState("");
+   const [editingThemeId, setEditingThemeId] = useState<string | null>(null);
+   const [editingThemeName, setEditingThemeName] = useState("");
+   const [editingThemeKeywords, setEditingThemeKeywords] = useState("");
+-  const [highlightOffset, setHighlightOffset] = useState(0);
+-  const [selectedHighlight, setSelectedHighlight] = useState<SurveyRow | null>(null);
+   const [savedCommentIds, setSavedCommentIds] = useState<string[]>([]);
+   const [sessionSeed] = useState<number>(() => Date.now());
+   const [showSavedOnly, setShowSavedOnly] = useState(false);
+   
+   const [compareProjectId, setCompareProjectId] = useState<string>("");
+   const [allProjects, setAllProjects] = useState<any[]>([]);
+   const [compareData, setCompareData] = useState<any | null>(null);
+   const [crossFamilyData, setCrossFamilyData] = useState<any[]>([]);
+   const [compareLoading, setCompareLoading] = useState(false);
+ 
+   // Estados de la tabla de familias
+   const [familyTrendFilter, setFamilyTrendFilter] = useState<"all"|"up"|"down"|"flat">("all");
+   const [familyPage, setFamilyPage] = useState(1);
+   const [selectedFamilyModal, setSelectedFamilyModal] = useState<any | null>(null);
+   const FAMILIES_PER_PAGE = 8;
+ 
+   const currentYear = useMemo(() => getMostFrequentYear(stats.schoolData), [stats.schoolData]);
+ 
+-  useEffect(() => {
+-    if (fixedPolo) setChartPolo(fixedPolo);
+-  }, [fixedPolo]);
+-
+   useEffect(() => {
+     listarProyectosDB().then(data => {
+        const currentProjectId = stats.schoolData[0]?.projectId;
+        const currentProjectName = String(stats.schoolData[0]?.projectName || "");
+        const currentProjectNameNorm = normalize(currentProjectName);
+        const baseYear = extraerAnio(currentProjectName);
+        const filtered = data.filter((p: any) => {
+          if (p.id === currentProjectId) return false;
+          const optionNameNorm = normalize(String(p?.nombre || ""));
+          if (currentProjectNameNorm && optionNameNorm === currentProjectNameNorm) return false;
+          return true;
+        });
+        const ordered = filtered.sort((a: any, b: any) => {
+          const aSameYear = extraerAnio(String(a?.nombre || "")) === baseYear ? 1 : 0;
+          const bSameYear = extraerAnio(String(b?.nombre || "")) === baseYear ? 1 : 0;
+          if (aSameYear !== bSameYear) return bSameYear - aSameYear;
+          return String(b?.creado_at || "").localeCompare(String(a?.creado_at || ""));
+        });
+        setAllProjects(ordered);
+     });
+   }, [stats.schoolData]);
+ 
+   // Carga de datos del proyecto a comparar
+   useEffect(() => {
+     if (!compareProjectId) {
+@@ -513,189 +508,140 @@ export default function DirectorDashboard({
+   useEffect(() => {
+     if (typeof window === "undefined") return;
+     try {
+       const raw = window.sessionStorage.getItem("director:saved-comments");
+       const parsed: unknown = raw ? JSON.parse(raw) : [];
+       if (Array.isArray(parsed)) {
+         setSavedCommentIds(parsed.map((x) => String(x)));
+       }
+     } catch {
+       setSavedCommentIds([]);
+     }
+   }, []);
+ 
+   useEffect(() => {
+     if (typeof window === "undefined") return;
+     window.sessionStorage.setItem("director:saved-comments", JSON.stringify(savedCommentIds));
+   }, [savedCommentIds]);
+ 
+   const toggleSaveComment = (id: string) => {
+     setSavedCommentIds((prev) =>
+       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+     );
+   };
+ 
+   useEffect(() => {
+-    if (!userId || typeof window === "undefined") return;
+-    try {
+-      const raw = window.localStorage.getItem(`director:themes:${userId}`);
+-      const parsed: unknown = raw ? JSON.parse(raw) : [];
+-      if (Array.isArray(parsed) && parsed.length > 0) {
+-        const normalized = parsed
+-          .map((item) => {
+-            const id = String((item as { id?: unknown })?.id ?? "").trim();
+-            const keywords = Array.isArray((item as { keywords?: unknown })?.keywords)
+-              ? ((item as { keywords?: unknown[] }).keywords ?? []).map((x) => String(x).trim()).filter(Boolean)
+-              : [];
+-            return id && keywords.length > 0 ? { id, keywords } : null;
+-          })
+-          .filter(Boolean) as DirectorCustomTheme[];
+-        if (normalized.length > 0) setAllThemes(normalized);
+-      }
+-    } catch {
+-      // noop
+-    }
+-  }, [userId]);
++    if (!projectId) return;
++    obtenerTemasProyectoDB(projectId)
++      .then((themes) => {
++        if (Array.isArray(themes) && themes.length > 0) {
++          const normalized = themes
++            .map((item) => {
++              const id = String((item as { id?: unknown })?.id ?? "").trim();
++              const keywords = Array.isArray((item as { keywords?: unknown })?.keywords)
++                ? ((item as { keywords?: unknown[] }).keywords ?? []).map((x) => String(x).trim()).filter(Boolean)
++                : [];
++              return id && keywords.length > 0 ? { id, keywords } : null;
++            })
++            .filter(Boolean) as DirectorCustomTheme[];
++          if (normalized.length > 0) setAllThemes(normalized);
++        }
++      })
++      .catch(() => undefined);
++  }, [projectId]);
+ 
+   useEffect(() => {
+-    if (!userId || typeof window === "undefined") return;
+-    window.localStorage.setItem(`director:themes:${userId}`, JSON.stringify(allThemes));
+-  }, [allThemes, userId]);
+-
+-  const availablePolos = useMemo(() => {
+-    const sourceRows = (regionalRows && regionalRows.length > 0 ? regionalRows : stats.schoolData) as SurveyRow[];
+-    const p = uniqueStrings(sourceRows.map((r: SurveyRow) => r.polo)).filter(x => x && x !== "General");
+-    return ["Todos los polos", ...p.sort()];
+-  }, [stats.schoolData, regionalRows]);
++    if (!projectId) return;
++    guardarTemasProyectoDB(projectId, allThemes).catch(() => undefined);
++  }, [allThemes, projectId]);
+ 
+   const regionalData = useMemo(() => {
+     const sourceRows = (regionalRows && regionalRows.length > 0 ? regionalRows : stats.schoolData) as SurveyRow[];
+     const map: Record<string, { total: number, promoters: number, detractors: number }> = {};
+     const labelByKey: Record<string, string> = {};
+ 
+     sourceRows.forEach((r: SurveyRow) => {
+-      if (fixedPolo) {
+-        if (!matchesPoloName(r.polo, fixedPolo)) return;
+-        const schoolLabel = String(r.colegio || "Sin Colegio");
+-        const key = normalize(schoolLabel) || "sin colegio";
+-        if (!labelByKey[key]) labelByKey[key] = schoolLabel;
+-        if (!map[key]) map[key] = { total: 0, promoters: 0, detractors: 0 };
+-        map[key].total += 1;
+-        if (r.score >= 9) map[key].promoters += 1;
+-        if (r.score <= 6) map[key].detractors += 1;
+-      } else if (chartPolo === "Todos los polos") {
+-        const key = (r.polo && r.polo !== "General") ? r.polo : "Sin Polo";
+-        if (!map[key]) map[key] = { total: 0, promoters: 0, detractors: 0 };
+-        map[key].total += 1;
+-        if (r.score >= 9) map[key].promoters += 1;
+-        if (r.score <= 6) map[key].detractors += 1;
+-      } else {
+-        if (matchesPoloName(r.polo, chartPolo)) {
+-          const schoolLabel = String(r.colegio || "Sin Colegio");
+-          const key = normalize(schoolLabel) || "sin colegio";
+-          if (!labelByKey[key]) labelByKey[key] = schoolLabel;
+-          if (!map[key]) map[key] = { total: 0, promoters: 0, detractors: 0 };
+-          map[key].total += 1;
+-          if (r.score >= 9) map[key].promoters += 1;
+-          if (r.score <= 6) map[key].detractors += 1;
+-        }
+-      }
++      if (fixedPolo && !matchesPoloName(r.polo, fixedPolo)) return;
++      const schoolLabel = String(r.colegio || "Sin Colegio");
++      const key = normalize(schoolLabel) || "sin colegio";
++      if (!labelByKey[key]) labelByKey[key] = schoolLabel;
++      if (!map[key]) map[key] = { total: 0, promoters: 0, detractors: 0 };
++      map[key].total += 1;
++      if (r.score >= 9) map[key].promoters += 1;
++      if (r.score <= 6) map[key].detractors += 1;
+     });
+ 
+     const rows = Object.entries(map)
+       .map(([key, v]) => ({
+         name: (labelByKey[key] || key).replace("Buenos Aires", "BsAs").replace("Tucumán", "Tuc"),
+         nps: Math.round(((v.promoters - v.detractors) / v.total) * 100),
+         respuestas: v.total
+       }))
+       .sort((a, b) => b.nps - a.nps);
+ 
+     // Alinear el valor de NPS del colegio activo con el KPI superior.
+     const activeKey = normalize(activeSchool);
+     if (activeSchool !== "Todos los colegios" && activeKey) {
+       return rows.map((row) => {
+         const rowKey = normalize(row.name);
+         if (rowKey.includes(activeKey) || activeKey.includes(rowKey)) {
+           return { ...row, nps: stats.nps, respuestas: stats.total };
+         }
+         return row;
+       });
+     }
+     return rows;
+-  }, [stats.schoolData, regionalRows, chartPolo, fixedPolo, activeSchool, stats.nps, stats.total]);
++  }, [stats.schoolData, regionalRows, fixedPolo, activeSchool, stats.nps, stats.total]);
+ 
+   const topComplaints = useMemo(() => {
+     const counts: Record<string, number> = {};
+     stats.schoolData.forEach((r: SurveyRow) => {
+-      if (r.score <= 8) {
+-         const raw = normalize(r.improvement);
+-         allThemes.forEach(t => {
+-            if(t.keywords.some(kw => raw.includes(normalize(kw)))) counts[t.id] = (counts[t.id] || 0) + 1;
+-         });
+-      }
++      const raw = normalize(r.improvement);
++      allThemes.forEach(t => {
++        if (t.keywords.some(kw => raw.includes(normalize(kw)))) counts[t.id] = (counts[t.id] || 0) + 1;
++      });
+     });
+     return Object.entries(counts)
+       .map(([name, count]) => ({ name, count }))
+       .sort((a, b) => b.count - a.count)
+       .slice(0, 5); 
+   }, [stats.schoolData, allThemes]);
+ 
+   const topPositives = useMemo(() => {
+     const counts: Record<string, number> = {};
+     stats.schoolData.forEach((r: SurveyRow) => {
+-      if (r.score >= 7) {
+-         const raw = normalize(r.positive);
+-         allThemes.forEach(t => {
+-            if(t.keywords.some(kw => raw.includes(normalize(kw)))) counts[t.id] = (counts[t.id] || 0) + 1;
+-         });
+-      }
++      const raw = normalize(r.positive);
++      allThemes.forEach(t => {
++        if (t.keywords.some(kw => raw.includes(normalize(kw)))) counts[t.id] = (counts[t.id] || 0) + 1;
++      });
+     });
+     return Object.entries(counts)
+       .map(([name, count]) => ({ name, count }))
+       .sort((a, b) => b.count - a.count)
+       .slice(0, 5); 
+   }, [stats.schoolData, allThemes]);
+ 
+-  const positiveHighlights = [...filteredResponses]
+-    .filter((r) => r.score >= 9 && String(r.positive ?? "").trim().length > 30)
+-    .sort((a, b) => normalize(a.id).localeCompare(normalize(b.id)));
+-
+-  useEffect(() => {
+-    if (positiveHighlights.length <= 3) return;
+-    const timer = setInterval(() => {
+-      setHighlightOffset((prev) => prev + 1);
+-    }, 15000);
+-    return () => clearInterval(timer);
+-  }, [positiveHighlights.length]);
+-
+-  const visibleHighlights = useMemo(() => {
+-    if (positiveHighlights.length <= 3) return positiveHighlights;
+-    return Array.from({ length: 3 }).map((_, idx) => {
+-      const pos = (highlightOffset + idx) % positiveHighlights.length;
+-      return positiveHighlights[pos];
+-    });
+-  }, [positiveHighlights, highlightOffset]);
+ 
+   // Filtro y Paginación de Familias
+   const filteredFamilies = useMemo(() => {
+     if (familyTrendFilter === "all") return crossFamilyData;
+     return crossFamilyData.filter(f => f.trend === familyTrendFilter);
+   }, [crossFamilyData, familyTrendFilter]);
+ 
+   const familyTotalPages = Math.ceil(filteredFamilies.length / FAMILIES_PER_PAGE);
+   const paginatedFamilies = filteredFamilies.slice((familyPage - 1) * FAMILIES_PER_PAGE, familyPage * FAMILIES_PER_PAGE);
+ 
+   return (
+     <div className="space-y-6 relative">
+       
+       {/* MODAL DE RAYOS X (Detalle Familia) */}
+       {selectedFamilyModal && (
+         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm" onClick={() => setSelectedFamilyModal(null)}>
+           <div className="bg-white rounded-[32px] shadow-2xl w-full max-w-4xl overflow-hidden" onClick={e => e.stopPropagation()}>
+              <div className="bg-slate-50 border-b border-slate-100 p-6 flex items-center justify-between">
+                 <div>
+                   <h2 className="font-display text-2xl font-black text-slate-900">{selectedFamilyModal.nombre}</h2>
+                   <p className="text-xs font-bold text-slate-500 mt-1 uppercase tracking-widest">Auditoría de respuestas comparadas</p>
+                 </div>
+                 <button onClick={() => setSelectedFamilyModal(null)} className="p-2 rounded-full hover:bg-slate-200 text-slate-500 transition-colors">
+                    <X size={20} weight="bold" />
+                 </button>
+@@ -730,148 +676,81 @@ export default function DirectorDashboard({
+                    <div className="flex items-center justify-between mb-4">
+                       <div className="flex flex-col">
+                         <span className="text-xs font-bold uppercase tracking-widest text-blue-600">Actual</span>
+                         <span className="text-[10px] font-bold text-blue-500 mt-0.5">AÑO {currentYear}</span>
+                       </div>
+                       <span className={`px-3 py-1 rounded-lg text-sm font-black ${selectedFamilyModal.currentScore >= 9 ? "bg-emerald-100 text-emerald-700" : selectedFamilyModal.currentScore >= 7 ? "bg-amber-100 text-amber-700" : "bg-red-100 text-red-700"}`}>
+                         Nota {selectedFamilyModal.currentScore}
+                       </span>
+                    </div>
+                    <div className="space-y-5 h-[300px] overflow-y-auto pr-2 custom-scrollbar">
+                      <div>
+                        <p className="text-[10px] font-black uppercase text-emerald-600 mb-1.5 flex items-center gap-1.5"><ThumbsUp size={14} weight="fill"/> Lo que valora ahora</p>
+                        <p className="text-sm font-medium text-slate-900 leading-relaxed bg-white p-3 rounded-xl border border-emerald-100 shadow-sm">&ldquo;{selectedFamilyModal.currentPositive || "No respondió"}&rdquo;</p>
+                      </div>
+                      <div>
+                        <p className="text-[10px] font-black uppercase text-amber-600 mb-1.5 flex items-center gap-1.5"><Wrench size={14} weight="fill"/> Lo que pide mejorar ahora</p>
+                        <p className="text-sm font-medium text-slate-900 leading-relaxed bg-white p-3 rounded-xl border border-amber-100 shadow-sm">&ldquo;{selectedFamilyModal.currentImprovement || "No respondió"}&rdquo;</p>
+                      </div>
+                    </div>
+                 </div>
+              </div>
+           </div>
+         </div>
+       )}
+ 
+-      {selectedHighlight && (
+-        <div className="fixed inset-0 z-[101] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm" onClick={() => setSelectedHighlight(null)}>
+-          <div className="w-full max-w-2xl rounded-[28px] border border-white bg-white p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+-            <div className="mb-4 flex items-start justify-between">
+-              <div>
+-                <h3 className="font-display text-xl font-black text-slate-900">{buildName(selectedHighlight)}</h3>
+-                <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">{selectedHighlight.colegio} • {selectedHighlight.year}</p>
+-              </div>
+-              <button onClick={() => setSelectedHighlight(null)} className="rounded-full p-2 text-slate-500 transition-colors hover:bg-slate-100">
+-                <X size={18} weight="bold" />
+-              </button>
+-            </div>
+-
+-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+-              <div className="rounded-2xl border border-emerald-100 bg-emerald-50/70 p-4">
+-                <p className="text-[10px] font-black uppercase tracking-widest text-emerald-600">Cómo votó</p>
+-                <p className="mt-2 text-3xl font-black text-emerald-600">{selectedHighlight.score}/10</p>
+-                <p className="mt-1 text-xs font-bold text-emerald-700">{selectedHighlight.type}</p>
+-              </div>
+-              <div className="rounded-2xl border border-amber-100 bg-amber-50/70 p-4">
+-                <p className="text-[10px] font-black uppercase tracking-widest text-amber-700">Qué mejoraría</p>
+-                <div className="mt-2 max-h-[34vh] overflow-y-auto pr-1">
+-                  <p className="text-sm font-semibold leading-relaxed text-amber-900">
+-                    &ldquo;{selectedHighlight.improvement || "No dejó sugerencias de mejora."}&rdquo;
+-                  </p>
+-                </div>
+-              </div>
+-            </div>
+-          </div>
+-        </div>
+-      )}
+-
+       {/* KPIs Rápidos y NPS */}
+       <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
+         <div className="lg:col-span-4 flex flex-col items-center justify-center rounded-[32px] border border-white bg-white/85 p-6 shadow-2xl backdrop-blur-xl">
+           <p className="mb-2 text-[11px] font-black uppercase tracking-widest text-slate-400">NPS General</p>
+           <NpsGauge nps={stats.nps} total={stats.total} />
+         </div>
+ 
+         <div className="lg:col-span-8 rounded-[32px] border border-white bg-white/85 p-6 shadow-xl backdrop-blur-xl">
+           <h3 className="mb-4 flex items-center gap-2 font-display text-base font-black text-slate-900">
+             <ChartBar size={18} className="text-blue-500" /> Distribución de respuestas
+           </h3>
+           <div className="grid grid-cols-3 gap-4">
+             <div className="flex flex-col items-center justify-center rounded-2xl bg-emerald-50 p-4 text-center">
+               <span className="mb-1 text-[10px] font-black uppercase tracking-widest text-emerald-600">Promotores</span>
+               <span className="text-4xl font-black text-emerald-500">{stats.promoters}</span>
+               <span className="mt-1 text-xs font-bold text-emerald-400">{percentage(stats.promoters, stats.total)}%</span>
+             </div>
+             <div className="flex flex-col items-center justify-center rounded-2xl bg-amber-50 p-4 text-center">
+               <span className="mb-1 text-[10px] font-black uppercase tracking-widest text-amber-600">Satisfechos</span>
+               <span className="text-4xl font-black text-amber-500">{stats.passives}</span>
+               <span className="mt-1 text-xs font-bold text-amber-400">{percentage(stats.passives, stats.total)}%</span>
+             </div>
+             <div className="flex flex-col items-center justify-center rounded-2xl bg-red-50 p-4 text-center">
+               <span className="mb-1 text-[10px] font-black uppercase tracking-widest text-red-600">Insatisfechos</span>
+               <span className="text-4xl font-black text-red-500">{stats.detractors}</span>
+               <span className="mt-1 text-xs font-bold text-red-400">{percentage(stats.detractors, stats.total)}%</span>
+             </div>
+           </div>
+         </div>
+       </div>
+ 
+-      <div className="rounded-[32px] border border-white bg-gradient-to-r from-emerald-50/70 via-white to-blue-50/60 p-6 shadow-xl backdrop-blur-xl">
+-        <div className="mb-4 flex items-center gap-3">
+-          <div className="rounded-xl bg-emerald-100 p-2 text-emerald-600">
+-            <Heart size={20} weight="fill" />
+-          </div>
+-          <div>
+-            <h3 className="font-display text-base font-black text-slate-900">Señales positivas para llevarse hoy</h3>
+-            <p className="text-[10px] font-medium uppercase tracking-widest text-emerald-600">Fortalezas concretas reportadas por familias promotoras</p>
+-          </div>
+-          {positiveHighlights.length > 3 && (
+-            <button
+-              onClick={() => setHighlightOffset((prev) => prev + 1)}
+-              className="ml-auto rounded-xl border border-emerald-200 bg-white px-3 py-1.5 text-[10px] font-black uppercase tracking-widest text-emerald-700 transition-all hover:bg-emerald-100"
+-            >
+-              Rotar
+-            </button>
+-          )}
+-        </div>
+-        <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+-          {visibleHighlights.length > 0 ? (
+-            visibleHighlights.map((item, idx) => (
+-              <button key={`${item.id}-${idx}`} onClick={() => setSelectedHighlight(item)} className="rounded-2xl border border-emerald-100 bg-white/90 p-4 shadow-sm text-left transition-all hover:-translate-y-0.5 hover:shadow-md">
+-                <p className="text-[10px] font-black uppercase tracking-widest text-emerald-600">Fortaleza {idx + 1}</p>
+-                <p className="mt-2 text-xs font-semibold leading-relaxed text-slate-700">&ldquo;{String(item.positive).slice(0, 170)}{String(item.positive).length > 170 ? "…" : ""}&rdquo;</p>
+-                <p className="mt-3 text-[10px] font-bold uppercase tracking-widest text-slate-400">{buildName(item)} • {item.colegio}</p>
+-              </button>
+-            ))
+-          ) : (
+-            <div className="lg:col-span-3 rounded-2xl border border-dashed border-emerald-200 bg-white/80 p-5 text-center text-sm font-bold text-slate-500">
+-              Todavía no hay suficientes comentarios positivos extensos para destacar fortalezas.
+-            </div>
+-          )}
+-        </div>
+-      </div>
+-
+       <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+         {/* COMPARATIVA ESTRATÉGICA (YoY) */}
+         <div className="rounded-[32px] border border-indigo-100 bg-gradient-to-br from-white via-indigo-50/40 to-blue-50/50 p-6 shadow-xl backdrop-blur-xl flex flex-col">
+           <div className="mb-6 flex items-center justify-between gap-3 border-b border-indigo-100 pb-4">
+             <div className="flex items-center gap-3">
+               <div className="rounded-xl bg-indigo-100 p-2 text-indigo-700"><Scales size={20} weight="fill" /></div>
+               <div>
+                 <h3 className="font-display text-base font-black text-slate-900">Comparativa de Impacto</h3>
+                 <p className="text-[10px] font-medium text-indigo-500">Cruzá datos para ver evolución, cambios y desvíos clave.</p>
+               </div>
+             </div>
+             <HelpTip
+               title="Comparativa de impacto"
+               body="Fuente: respuestas cargadas en este proyecto y en el proyecto histórico seleccionado. Compara Participación (cantidad de respuestas) y NPS."
+             />
+           </div>
+ 
+           <div className="flex-1 flex flex-col">
+             <div className="mb-6 rounded-2xl border border-indigo-100 bg-white/90 p-3">
+               <span className="mb-2 block text-[10px] font-black uppercase tracking-widest text-indigo-500">Comparar contra</span>
+               <select 
+                 value={compareProjectId} 
+                 onChange={(e) => setCompareProjectId(e.target.value)}
+                 className="w-full rounded-xl border border-indigo-200 bg-indigo-50/40 px-3 py-2 text-sm font-bold text-slate-800 outline-none cursor-pointer transition-all hover:border-indigo-300 focus:border-indigo-400"
+               >
+@@ -1005,158 +884,148 @@ export default function DirectorDashboard({
+                   </div>
+                 ) : (
+                   <div className="flex-1 flex flex-col justify-center items-center text-center p-8 border border-dashed border-slate-200 rounded-2xl bg-slate-50/50">
+                     <p className="text-sm font-bold text-slate-500 mt-4">No se detectaron familias en común.</p>
+                     <p className="text-xs font-medium text-slate-400 mt-1 max-w-[250px]">El sistema cruza datos comparando el Nombre y Apellido ingresados.</p>
+                   </div>
+                 )}
+               </>
+             ) : compareData && compareData.total === 0 ? (
+               <div className="text-center py-8 text-sm font-bold text-red-500 bg-red-50 rounded-xl">El proyecto seleccionado no contiene respuestas válidas (faltan notas).</div>
+             ) : (
+               <div className="flex-1 flex items-center justify-center text-sm font-bold text-slate-400">Seleccioná un proyecto arriba para cruzar la base de datos.</div>
+             )}
+           </div>
+         </div>
+ 
+         {/* RANKING (NPS REGIONAL / COLEGIOS) */}
+         <div className="rounded-[32px] border border-white bg-white/85 p-6 shadow-xl backdrop-blur-xl flex flex-col h-full min-h-[450px]">
+           <div className="mb-4 flex items-center justify-between border-b border-slate-100 pb-4 shrink-0">
+             <div className="flex items-center gap-3">
+               <div className="rounded-xl bg-slate-100 p-2 text-indigo-600"><MapPin size={20} weight="fill" /></div>
+               <div>
+                 <h3 className="font-display text-base font-black text-slate-900">Ranking NPS</h3>
+                 <p className="text-[10px] font-medium text-slate-400">
+                   {fixedPolo
+-                    ? `Comparación automática del polo ${fixedPolo}.`
+-                    : chartPolo === "Todos los polos"
+-                      ? "Comparativa general entre polos."
+-                      : `Ranking de colegios en ${chartPolo}.`}
++                    ? `Comparación de colegios dentro del polo ${fixedPolo}.`
++                    : "Comparación directa de todos los colegios."}
+                 </p>
+               </div>
+             </div>
+-            {!fixedPolo && (
+-              <select
+-                value={chartPolo}
+-                onChange={(e) => setChartPolo(e.target.value)}
+-                className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-blue-700 outline-none cursor-pointer max-w-[120px] truncate"
+-              >
+-                {availablePolos.map(p => <option key={p} value={p}>{p}</option>)}
+-              </select>
+-            )}
+           </div>
+ 
+           <div className="flex-1 min-h-0">
+             {regionalData.length > 0 ? (
+               <ResponsiveContainer width="100%" height="100%">
+                 <BarChart data={regionalData} layout="vertical" margin={{ top: 0, right: 20, left: 30, bottom: 0 }}>
+                   <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" horizontal={false} />
+                   <XAxis type="number" domain={[-100, 100]} tick={{ fontSize: 10, fill: "#94A3B8", fontWeight: "bold" }} axisLine={false} tickLine={false} />
+                   <YAxis dataKey="name" type="category" tick={{ fontSize: 10, fill: "#64748B", fontWeight: "bold" }} axisLine={false} tickLine={false} dx={-10} />
+                   <Tooltip cursor={{fill: 'transparent'}} content={<DirectorTooltip />} />
+                   <Bar dataKey="nps" name="Puntos NPS" radius={[0, 6, 6, 0]} barSize={20}>
+                     {regionalData.map((entry, index) => (
+                       <Cell key={`cell-${index}`} fill={entry.nps >= 50 ? "#10B981" : entry.nps >= 0 ? "#3B82F6" : "#EF4444"} />
+                     ))}
+                   </Bar>
+                 </BarChart>
+               </ResponsiveContainer>
+             ) : (
+               <div className="flex h-full items-center justify-center text-sm font-bold text-slate-400">Sin datos de polos/colegios</div>
+             )}
+           </div>
+         </div>
+       </div>
+ 
+       {/* GRÁFICOS DE ANÁLISIS DE TAGS (POSITIVOS VS NEGATIVOS) */}
+       <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+          {/* TOP ASPECTOS VALORADOS */}
+          <div className="rounded-[32px] border border-white bg-white/85 p-6 shadow-xl backdrop-blur-xl flex flex-col h-[350px]">
+            <div className="mb-4 flex items-center justify-between border-b border-slate-100 pb-4 shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="rounded-xl bg-emerald-50 p-2 text-emerald-600"><Heart size={20} weight="fill" /></div>
+                <div>
+                  <h3 className="font-display text-base font-black text-slate-900">Aspectos más Valorados</h3>
+-                 <p className="text-[10px] font-medium text-slate-400">Temáticas destacadas por Promotores y Pasivos.</p>
++                 <p className="text-[10px] font-medium text-slate-400">Temáticas destacadas usando todas las respuestas.</p>
+                </div>
+              </div>
+              <HelpTip
+                title="Aspectos más valorados"
+-               body="Fuente: campo “Lo que más valoran” de las encuestas. Cuenta menciones por palabras clave de temas en respuestas de notas 7 a 10."
++               body="Fuente: campo “Lo que más valoran” de todas las encuestas. Cuenta menciones por palabras clave de temas en todas las respuestas."
+              />
+            </div>
+            <div className="flex-1 min-h-0">
+              {topPositives.length > 0 ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={topPositives} layout="vertical" margin={{ top: 0, right: 20, left: 30, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" horizontal={false} />
+                    <XAxis type="number" tick={{ fontSize: 10, fill: "#94A3B8", fontWeight: "bold" }} axisLine={false} tickLine={false} />
+                    <YAxis dataKey="name" type="category" tick={{ fontSize: 10, fill: "#64748B", fontWeight: "bold" }} axisLine={false} tickLine={false} dx={-10} />
+                    <Tooltip cursor={{fill: 'transparent'}} content={<DirectorTooltip />} />
+                    <Bar dataKey="count" name="Menciones Positivas" radius={[0, 6, 6, 0]} barSize={16} fill="#34D399" />
+                  </BarChart>
+                </ResponsiveContainer>
+              ) : (
+                 <div className="flex h-full items-center justify-center text-sm font-bold text-slate-400">Sin suficientes menciones positivas para clasificar</div>
+              )}
+            </div>
+          </div>
+ 
+-         {/* TOP Focos de Conflicto */}
++         {/* TOP Aspectos a mejorar */}
+          <div className="rounded-[32px] border border-white bg-white/85 p-6 shadow-xl backdrop-blur-xl flex flex-col h-[350px]">
+            <div className="mb-4 flex items-center justify-between border-b border-slate-100 pb-4 shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="rounded-xl bg-red-50 p-2 text-red-600"><WarningCircle size={20} weight="fill" /></div>
+                <div>
+-                 <h3 className="font-display text-base font-black text-slate-900">Focos de Conflicto</h3>
+-                 <p className="text-[10px] font-medium text-slate-400">Temáticas criticadas por Detractores/Pasivos.</p>
++                 <h3 className="font-display text-base font-black text-slate-900">Aspectos a mejorar</h3>
++                 <p className="text-[10px] font-medium text-slate-400">Aspectos a mejorar usando todas las respuestas.</p>
+                </div>
+              </div>
+              <HelpTip
+-               title="Focos de conflicto"
+-               body="Fuente: campo “Qué mejorarían” de las encuestas. Cuenta menciones por palabras clave de temas en respuestas de notas 1 a 8."
++               title="Aspectos a mejorar"
++               body="Fuente: campo “Qué mejorarían” de todas las encuestas. Cuenta menciones por palabras clave de temas en todas las respuestas."
+              />
+            </div>
+            <div className="flex-1 min-h-0">
+              {topComplaints.length > 0 ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={topComplaints} layout="vertical" margin={{ top: 0, right: 20, left: 30, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" horizontal={false} />
+                    <XAxis type="number" tick={{ fontSize: 10, fill: "#94A3B8", fontWeight: "bold" }} axisLine={false} tickLine={false} />
+                    <YAxis dataKey="name" type="category" tick={{ fontSize: 10, fill: "#64748B", fontWeight: "bold" }} axisLine={false} tickLine={false} dx={-10} />
+                    <Tooltip cursor={{fill: 'transparent'}} content={<DirectorTooltip />} />
+                    <Bar dataKey="count" name="Menciones Negativas" radius={[0, 6, 6, 0]} barSize={16} fill="#F87171" />
+                  </BarChart>
+                </ResponsiveContainer>
+              ) : (
+                 <div className="flex h-full items-center justify-center text-sm font-bold text-slate-400">Sin suficientes quejas para clasificar</div>
+              )}
+            </div>
+          </div>
+       </div>
+ 
+       {/* LECTURA DE COMENTARIOS */}
++      {canEditThemes && (
+       <div className="rounded-[32px] border border-white bg-white/85 shadow-xl backdrop-blur-xl flex flex-col overflow-hidden">
+         
+         <div className="p-6 border-b border-slate-100 flex flex-col gap-5 bg-slate-50/50">
+           <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+             <div>
+               <h3 className="font-display text-lg font-black text-slate-900 flex items-center gap-2"><ChatCircleText size={20} className="text-blue-600"/> Lupa de Comentarios</h3>
+               <p className="text-xs font-medium text-slate-500 mt-1">Filtrá por tema y perfil para analizar las respuestas.</p>
+             </div>
+ 
+             <div className="flex items-center gap-2">
+               <div className="flex items-center gap-1 rounded-xl bg-slate-200/50 p-1">
+                 {[5, 10, 20].map((n) => (
+                   <button
+                     key={n}
+                     onClick={() => setDirectorCommentLimit(n)}
+                     className={`rounded-lg px-3 py-1.5 text-xs font-bold transition-all ${directorCommentLimit === n
+                       ? "bg-white text-blue-700 shadow-sm"
+                       : "text-slate-500 hover:text-slate-700"
+                       }`}
+                   >
+                     {`${n} res`}
+                   </button>
+                 ))}
+               </div>
+ 
+@@ -1357,28 +1226,29 @@ export default function DirectorDashboard({
+                       </button>
+                     </div>
+                   </div>
+ 
+                   <div className="flex-1 overflow-y-auto space-y-4 pr-2 custom-scrollbar">
+                     {r.positive.trim() && (
+                       <div>
+                         <p className="mb-1.5 text-[10px] font-black uppercase tracking-widest text-emerald-600 flex items-center gap-1.5"><ThumbsUp size={12} weight="fill"/> Lo que valora</p>
+                         <p className="text-[13px] font-medium text-slate-700 leading-relaxed">&ldquo;{highlightText(r.positive, "", themeKeywords)}&rdquo;</p>
+                       </div>
+                     )}
+                     {r.improvement.trim() && (
+                       <div className="bg-white/60 p-3 rounded-2xl border border-white">
+                         <p className="mb-1.5 text-[10px] font-black uppercase tracking-widest text-amber-600 flex items-center gap-1.5"><Wrench size={12} weight="fill"/> Lo que mejoraría</p>
+                         <p className="text-[13px] font-medium text-slate-800 leading-relaxed">&ldquo;{highlightText(r.improvement, "", themeKeywords)}&rdquo;</p>
+                       </div>
+                     )}
+                   </div>
+                 </div>
+               ))
+             )}
+           </div>
+         </div>
+ 
+       </div>
++      )}
+     </div>
+   );
+ }
+diff --git a/src/components/TeamDashboard.tsx b/src/components/TeamDashboard.tsx
+index 79ba92bfcd5412982a19020a724329830a1223e3..458ce1a377f6fa8d317ce61b817fe03bddc9c7c1 100644
+--- a/src/components/TeamDashboard.tsx
++++ b/src/components/TeamDashboard.tsx
+@@ -1,46 +1,47 @@
+ "use client";
+ 
+ import { useEffect, useMemo, useState } from "react";
+ import {
+   Star,
+   Smiley,
+   Warning,
+   ThumbsUp,
+   Wrench,
+   Funnel,
+   MagnifyingGlass,
+   X,
+   DownloadSimple,
+   CaretLeft,
+   CaretRight,
+   Bookmarks,
+   Plus,
+   SortDescending,
+   PencilSimple,
+   Info
+ } from "phosphor-react";
++import { obtenerTemasProyectoDB, guardarTemasProyectoDB } from "../app/actions";
+ 
+ // ─────────────────────────────────────────────
+ // TIPOS
+ // ─────────────────────────────────────────────
+ type FilterType = "Todos" | "Promotor" | "Satisfecho" | "Insatisfecho";
+ 
+ export type SurveyRow = {
+   id: string;
+   date: string;
+   nombre: string;
+   apellido: string;
+   colegio: string;
+   curso: string;
+   polo: string;
+   sexo: string;
+   score: number;
+   type: "Promotor" | "Satisfecho" | "Insatisfecho";
+   positive: string;
+   improvement: string;
+   positiveTags: string[];
+   improvementTags: string[];
+   sentiment: "Crítico" | "Observación" | "Sugerencia" | "Neutro";
+   sentimentScore: number;
+   year: number;
+ };
+@@ -231,62 +232,64 @@ function SurveyCard({
+           onClick={() => onToggleSave(res.id)}
+           className={`rounded-lg px-2.5 py-1 text-[10px] font-black uppercase tracking-widest transition-colors ${
+             isSaved ? "bg-indigo-600 text-white hover:bg-indigo-700" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+           }`}
+         >
+           {isSaved ? "Guardado" : "Guardar"}
+         </button>
+       </div>
+     </div>
+   );
+ }
+ 
+ // ─────────────────────────────────────────────
+ // COMPONENTE PRINCIPAL: TEAM DASHBOARD
+ // ─────────────────────────────────────────────
+ type TeamDashboardProps = {
+   stats: any;
+   filteredResponses: SurveyRow[];
+   searchTerm: string;
+   setSearchTerm: (val: string) => void;
+   filterType: FilterType;
+   setFilterType: (val: FilterType) => void;
+   currentPage: number;
+   setCurrentPage: React.Dispatch<React.SetStateAction<number>>;
+   downloadCSV: () => void;
++  projectId?: string;
+ };
+ 
+ export default function TeamDashboard({
+   stats,
+   filteredResponses,
+   searchTerm,
+   setSearchTerm,
+   filterType,
+   setFilterType,
+   currentPage,
+   setCurrentPage,
+   downloadCSV,
++  projectId,
+ }: TeamDashboardProps) {
+   
+   // Estados para nuevas funciones
+   const [sortBy, setSortBy] = useState<"recientes" | "mayor" | "menor">("recientes");
+   const [customCategories, setCustomCategories] = useState<CustomCategory[]>(DEFAULT_RADAR_CATEGORIES);
+   const [activeCategory, setActiveCategory] = useState<string | null>(null);
+   const [savedCommentIds, setSavedCommentIds] = useState<string[]>([]);
+   const [savedFilter, setSavedFilter] = useState<"all" | "saved">("all");
+   const [sessionSeed] = useState<number>(() => Date.now());
+   const [selectedDetail, setSelectedDetail] = useState<SurveyRow | null>(null);
+   const [selectedRadarTopic, setSelectedRadarTopic] = useState<string | null>(null);
+   const [toneSeed, setToneSeed] = useState<number>(() => Date.now());
+   
+   // Formulario nueva categoría
+   const [isCreatingCat, setIsCreatingCat] = useState(false);
+   const [newCatName, setNewCatName] = useState("");
+   const [newCatWords, setNewCatWords] = useState("");
+   const [editingCatName, setEditingCatName] = useState<string | null>(null);
+   const [editingCatNewName, setEditingCatNewName] = useState("");
+   const [editingCatWords, setEditingCatWords] = useState("");
+   const [editingToneRules, setEditingToneRules] = useState(false);
+   const [positiveToneRules, setPositiveToneRules] = useState("agradezco, excelente, contento, feliz, recomiendo");
+   const [constructiveToneRules, setConstructiveToneRules] = useState("deberia, mejorar, faltaria, sugerencia, podrian");
+ 
+   const handleAddCategory = () => {
+@@ -306,50 +309,74 @@ export default function TeamDashboard({
+     if (activeCategory === name) setActiveCategory(null);
+   };
+ 
+   const startEditCategory = (name: string, e: React.MouseEvent) => {
+     e.stopPropagation();
+     const cat = customCategories.find((c) => c.name === name);
+     if (!cat) return;
+     setEditingCatName(cat.name);
+     setEditingCatNewName(cat.name);
+     setEditingCatWords(cat.keywords.join(", "));
+   };
+ 
+   const saveCategoryEdit = () => {
+     if (!editingCatName) return;
+     const keywords = editingCatWords.split(",").map((w) => w.trim()).filter(Boolean);
+     if (keywords.length === 0) return;
+     const newName = editingCatNewName.trim();
+     if (!newName) return;
+     setCustomCategories((prev) => prev.map((c) => (c.name === editingCatName ? { ...c, name: newName, keywords } : c)));
+     if (activeCategory === editingCatName) setActiveCategory(newName);
+     setEditingCatName(null);
+     setEditingCatNewName("");
+     setEditingCatWords("");
+   };
+ 
++  useEffect(() => {
++    if (!projectId) return;
++    obtenerTemasProyectoDB(projectId)
++      .then((themes) => {
++        if (!Array.isArray(themes) || themes.length === 0) return;
++        const mapped = themes
++          .map((t) => ({
++            name: String((t as { id?: unknown })?.id ?? "").trim(),
++            keywords: Array.isArray((t as { keywords?: unknown })?.keywords)
++              ? ((t as { keywords?: unknown[] }).keywords ?? []).map((x) => String(x).trim()).filter(Boolean)
++              : [],
++          }))
++          .filter((x) => x.name && x.keywords.length > 0);
++        if (mapped.length > 0) setCustomCategories(mapped);
++      })
++      .catch(() => undefined);
++  }, [projectId]);
++
++  useEffect(() => {
++    if (!projectId) return;
++    const payload = customCategories.map((c) => ({ id: c.name, keywords: c.keywords }));
++    guardarTemasProyectoDB(projectId, payload).catch(() => undefined);
++  }, [customCategories, projectId]);
++
+   useEffect(() => {
+     if (typeof window === "undefined") return;
+     try {
+       const raw = window.sessionStorage.getItem("team:saved-comments");
+       const parsed: unknown = raw ? JSON.parse(raw) : [];
+       if (Array.isArray(parsed)) setSavedCommentIds(parsed.map((x) => String(x)));
+     } catch {
+       setSavedCommentIds([]);
+     }
+   }, []);
+ 
+   useEffect(() => {
+     if (typeof window === "undefined") return;
+     window.sessionStorage.setItem("team:saved-comments", JSON.stringify(savedCommentIds));
+   }, [savedCommentIds]);
+ 
+   useEffect(() => {
+     if (typeof window === "undefined") return;
+     const savedPos = window.localStorage.getItem("team:tone:positive");
+     const savedCon = window.localStorage.getItem("team:tone:constructive");
+     if (savedPos) setPositiveToneRules(savedPos);
+     if (savedCon) setConstructiveToneRules(savedCon);
+   }, []);
+ 
+   useEffect(() => {
+diff --git a/src/types/xlsx.d.ts b/src/types/xlsx.d.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..3ad6d7fa9d2421c2e90c0aa77eb40b683cdcf6a3
+--- /dev/null
++++ b/src/types/xlsx.d.ts
+@@ -0,0 +1,2 @@
++declare module "xlsx";
++
