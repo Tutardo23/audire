@@ -288,13 +288,14 @@ function AnalyticsDashboardLive() {
   const isTeam = userRole === "equipo";
   const canChooseSchool = isAdmin;
   const canSwitchView = isAdmin;
+  const canViewTeam = isAdmin || isTeam;
   const router = useRouter();
   const searchParams = useSearchParams();
   const projectId = searchParams.get("projectId") || "";
 
   const [directorCommentLimit, setDirectorCommentLimit] = useState<number>(20); 
   const [directorTopic, setDirectorTopic] = useState<DirectorTopic>("Satisfecho");
-  const [viewMode, setViewMode] = useState<ViewMode>(isDirector ? "director" : "team");
+  const [viewMode, setViewMode] = useState<ViewMode>(canViewTeam ? "team" : "director");
   const [logoOk, setLogoOk] = useState(true);
   const [audireLogoOk, setAudireLogoOk] = useState(true);
 
@@ -317,6 +318,7 @@ function AnalyticsDashboardLive() {
   const [currentPage, setCurrentPage] = useState(1);
   const schoolTheme = schoolBrand(activeSchool);
   const schoolLogo = activeSchool === "Todos los colegios" ? "/escudo-apdes.png" : schoolLogoPath(activeSchool);
+  const effectiveViewMode: ViewMode = viewMode === "team" && canViewTeam ? "team" : "director";
 
   useEffect(() => {
     setLogoOk(true);
@@ -324,8 +326,8 @@ function AnalyticsDashboardLive() {
 
   useEffect(() => {
     if (isAdmin) return;
-    setViewMode(isDirector ? "director" : "team");
-  }, [isAdmin, isDirector]);
+    setViewMode(isTeam ? "team" : "director");
+  }, [isAdmin, isTeam]);
 
   useEffect(() => {
     if (scopedFilters.colegio) {
@@ -896,7 +898,7 @@ function AnalyticsDashboardLive() {
             <ViewModeSwitch viewMode={viewMode} setViewMode={setViewMode} />
           ) : (
             <div className="rounded-2xl bg-slate-100 px-4 py-2 text-xs font-black uppercase tracking-widest text-slate-500">
-              {isDirector ? "Perfil Dirección" : "Perfil Equipo"}
+              {isTeam ? "Perfil Equipo" : "Perfil Dirección"}
             </div>
           )}
         </div>
@@ -929,10 +931,10 @@ function AnalyticsDashboardLive() {
     <div className="min-h-screen overflow-x-hidden bg-[#F4F7FB] pb-12 font-sans">
       <Header />
       <main className="mx-auto mt-8 w-full max-w-[1600px] px-6">
-        {viewMode === "director" ? (
+        {effectiveViewMode === "director" ? (
           <DirectorDashboard
             stats={directorStats}
-            filteredResponses={viewMode === "director" ? directorStats.schoolData : filteredResponses}
+            filteredResponses={effectiveViewMode === "director" ? directorStats.schoolData : filteredResponses}
             directorCommentLimit={directorCommentLimit}
             setDirectorCommentLimit={setDirectorCommentLimit}
             directorTopic={directorTopic}
@@ -992,7 +994,7 @@ function AnalyticsDashboardLive() {
 
             <div className={`mb-4 grid gap-3 ${isDirector ? "grid-cols-1" : "grid-cols-2"}`}>
               <Link prefetch={false} href={`/dashboard/analytics?projectId=${projectId}`} onClick={() => setIsMenuOpen(false)} className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white p-5 text-sm font-black text-slate-700 shadow-sm transition-all hover:bg-slate-50 hover:text-indigo-600 hover:border-indigo-200"><ChartBar size={24} weight="fill" className="text-indigo-500" /> Analítica Avanzada</Link>
-              {!isDirector && (
+              {canViewTeam && (
                 <Link prefetch={false} href={`/dashboard/reports?projectId=${projectId}`} onClick={() => setIsMenuOpen(false)} className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white p-5 text-sm font-black text-slate-700 shadow-sm transition-all hover:bg-slate-50 hover:text-red-600 hover:border-red-200"><FilePdf size={24} weight="fill" className="text-red-500" /> Generar Informes</Link>
               )}
             </div>
@@ -1004,7 +1006,12 @@ function AnalyticsDashboardLive() {
               </div>
             )}
 
-            
+            {canViewTeam && (
+              <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <h4 className="text-sm font-black text-slate-900">Exportación de Datos</h4>
+                <button onClick={downloadCSV} className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-3 text-sm font-bold text-white transition-all hover:bg-slate-800 shadow-md active:scale-95"><DownloadSimple size={16} weight="bold" /> Descargar Excel (CSV)</button>
+              </div>
+            )}
 
             {isAdmin && (
               <div className="mt-4 rounded-2xl border border-red-200 bg-red-50 p-5">

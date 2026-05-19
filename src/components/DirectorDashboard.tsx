@@ -5,7 +5,6 @@ import {
   ChartBar,
   ChatCircleText,
   CircleNotch,
-  WarningCircle,
   Wrench,
   TrendUp,
   X,
@@ -627,6 +626,7 @@ export default function DirectorDashboard({
   const [savedCommentIds, setSavedCommentIds] = useState<string[]>([]);
   const [sessionSeed] = useState<number>(() => Date.now());
   const [showSavedOnly, setShowSavedOnly] = useState(false);
+  const [commentSearch, setCommentSearch] = useState("");
   
   const [compareProjectId, setCompareProjectId] = useState<string>("");
   const [allProjects, setAllProjects] = useState<any[]>([]);
@@ -1080,6 +1080,14 @@ export default function DirectorDashboard({
       rows = rows.filter((r) => savedCommentIds.includes(r.id));
     }
 
+    const search = normalize(commentSearch);
+    if (search) {
+      rows = rows.filter((r) => {
+        const haystack = normalize(`${r.nombre} ${r.apellido} ${r.colegio} ${r.positive} ${r.improvement}`);
+        return haystack.includes(search);
+      });
+    }
+
     rows = [...rows].sort((a, b) => {
       const seed = sessionSeed + commentRefreshCounter;
       const aSeed = seededOrder(`${a.id}-${a.score}`, seed);
@@ -1088,7 +1096,7 @@ export default function DirectorDashboard({
     });
 
     return rows.slice(0, directorCommentLimit);
-  }, [filteredResponses, directorTopic, directorCommentLimit, commentTheme, commentRefreshCounter, allThemes, sessionSeed, showSavedOnly, savedCommentIds]);
+  }, [filteredResponses, directorTopic, directorCommentLimit, commentTheme, commentRefreshCounter, allThemes, sessionSeed, showSavedOnly, savedCommentIds, commentSearch]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1388,20 +1396,6 @@ export default function DirectorDashboard({
       : rows;
   }, [stats.schoolData, regionalRows, activeSchool, npsViewMode, ownSchool, ownPolo, fixedPolo, currentYear, activeSchoolPolo, currentProjectName, projectId]);
 
-  const topComplaints = useMemo(() => {
-    const counts: Record<string, number> = {};
-    stats.schoolData.forEach((r: SurveyRow) => {
-      const raw = normalize(r.improvement);
-      allThemes.forEach(t => {
-        if (t.keywords.some(kw => raw.includes(normalize(kw)))) counts[t.id] = (counts[t.id] || 0) + 1;
-      });
-    });
-    return Object.entries(counts)
-      .map(([name, count]) => ({ name, count }))
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 5); 
-  }, [stats.schoolData, allThemes]);
-
   const topPositives = useMemo(() => {
     const counts: Record<string, number> = {};
     stats.schoolData.forEach((r: SurveyRow) => {
@@ -1436,7 +1430,7 @@ export default function DirectorDashboard({
              <div className="bg-slate-50 border-b border-slate-100 p-6 flex items-center justify-between">
                 <div>
                   <h2 className="font-display text-2xl font-black text-slate-900">{selectedFamilyModal.nombre}</h2>
-                  <p className="text-xs font-bold text-slate-500 mt-1 uppercase tracking-widest">Auditoría de respuestas comparadas</p>
+                  <p className="text-xs font-bold text-slate-500 mt-1 uppercase tracking-widest">Comparación de respuestas por familia</p>
                 </div>
                 <button onClick={() => setSelectedFamilyModal(null)} className="p-2 rounded-full hover:bg-slate-200 text-slate-500 transition-colors">
                    <X size={20} weight="bold" />
@@ -1458,11 +1452,11 @@ export default function DirectorDashboard({
                    <div className="space-y-5 h-[300px] overflow-y-auto pr-2 custom-scrollbar">
                      <div>
                        <p className="text-[10px] font-black uppercase text-emerald-600 mb-1.5 flex items-center gap-1.5"><ThumbsUp size={14} weight="fill"/> Lo que valoraba</p>
-                       <p className="text-sm font-medium text-slate-600 leading-relaxed italic bg-slate-50 p-3 rounded-xl border border-slate-100">&ldquo;{selectedFamilyModal.comparePositive || "No respondió"}&rdquo;</p>
+                       <p className="text-sm font-medium text-slate-600 leading-relaxed italic bg-slate-50 p-3 rounded-xl border border-slate-100">&ldquo;{selectedFamilyModal.comparePositive || "Sin comentario cargado en este campo"}&rdquo;</p>
                      </div>
                      <div>
                        <p className="text-[10px] font-black uppercase text-slate-400 mb-1.5 flex items-center gap-1.5"><Wrench size={14} weight="fill"/> Oportunidades de mejora</p>
-                       <p className="text-sm font-medium text-slate-600 leading-relaxed italic bg-slate-50 p-3 rounded-xl border border-slate-100">&ldquo;{selectedFamilyModal.compareImprovement || "No respondió"}&rdquo;</p>
+                       <p className="text-sm font-medium text-slate-600 leading-relaxed italic bg-slate-50 p-3 rounded-xl border border-slate-100">&ldquo;{selectedFamilyModal.compareImprovement || "Sin comentario cargado en este campo"}&rdquo;</p>
                      </div>
                    </div>
                 </div>
@@ -1481,11 +1475,11 @@ export default function DirectorDashboard({
                    <div className="space-y-5 h-[300px] overflow-y-auto pr-2 custom-scrollbar">
                      <div>
                        <p className="text-[10px] font-black uppercase text-emerald-600 mb-1.5 flex items-center gap-1.5"><ThumbsUp size={14} weight="fill"/> Lo que valora ahora</p>
-                       <p className="text-sm font-medium text-slate-900 leading-relaxed bg-white p-3 rounded-xl border border-emerald-100 shadow-sm">&ldquo;{selectedFamilyModal.currentPositive || "No respondió"}&rdquo;</p>
+                       <p className="text-sm font-medium text-slate-900 leading-relaxed bg-white p-3 rounded-xl border border-emerald-100 shadow-sm">&ldquo;{selectedFamilyModal.currentPositive || "Sin comentario cargado en este campo"}&rdquo;</p>
                      </div>
                      <div>
                        <p className="text-[10px] font-black uppercase text-amber-600 mb-1.5 flex items-center gap-1.5"><Wrench size={14} weight="fill"/> Oportunidades de mejora actuales</p>
-                       <p className="text-sm font-medium text-slate-900 leading-relaxed bg-white p-3 rounded-xl border border-amber-100 shadow-sm">&ldquo;{selectedFamilyModal.currentImprovement || "No respondió"}&rdquo;</p>
+                       <p className="text-sm font-medium text-slate-900 leading-relaxed bg-white p-3 rounded-xl border border-amber-100 shadow-sm">&ldquo;{selectedFamilyModal.currentImprovement || "Sin comentario cargado en este campo"}&rdquo;</p>
                      </div>
                    </div>
                 </div>
@@ -1495,282 +1489,112 @@ export default function DirectorDashboard({
       )}
 
       {/* KPIs Rápidos y NPS */}
-      <div className={`grid grid-cols-1 gap-5 ${isExecutiveAllSchoolsView ? "lg:grid-cols-12" : "lg:grid-cols-2"}`}>
-        <div className={`${isExecutiveAllSchoolsView ? "lg:col-span-4" : ""} flex flex-col items-center justify-center rounded-[32px] border border-white bg-white/85 p-6 shadow-2xl backdrop-blur-xl`}>
+      <div className="grid grid-cols-1 gap-5 xl:grid-cols-12">
+        <div className="xl:col-span-4 flex flex-col items-center justify-center rounded-[32px] border border-white bg-white/85 p-6 shadow-2xl backdrop-blur-xl">
           <p className="mb-2 text-[11px] font-black uppercase tracking-widest text-slate-400">NPS General</p>
           <NpsGauge nps={stats.nps} total={stats.total} />
         </div>
 
-        <div className={`${isExecutiveAllSchoolsView ? "lg:col-span-8" : ""} rounded-[32px] border border-white bg-white/85 p-6 shadow-xl backdrop-blur-xl`}>
+        <div className="xl:col-span-3 rounded-[32px] border border-white bg-white/85 p-6 shadow-xl backdrop-blur-xl">
+          <div className="flex h-full flex-col justify-center">
+            <p className="text-[11px] font-black uppercase tracking-widest text-blue-500">Participación familiar</p>
+            {familyParticipationLoading && !familyParticipationExecutive ? (
+              <div className="mt-5 flex items-center gap-2 text-xs font-black text-slate-500">
+                <CircleNotch size={16} weight="bold" className="animate-spin text-blue-600" />
+                Cargando participación...
+              </div>
+            ) : familyParticipationExecutive ? (
+              <>
+                <div className="mt-4 flex items-end gap-2">
+                  <span className="font-display text-5xl font-black leading-none text-blue-600">
+                    {familyParticipationExecutive.participationPct}%
+                  </span>
+                </div>
+                <p className="mt-2 text-xs font-bold leading-relaxed text-slate-500">
+                  {familyParticipationExecutive.familiasConRespuesta} de {familyParticipationExecutive.totalFamilias} familias con respuesta.
+                </p>
+                <p className="mt-1 text-[10px] font-semibold text-slate-400">
+                  Cuenta familias, no encuestas individuales.
+                </p>
+              </>
+            ) : (
+              <p className="mt-4 text-sm font-bold text-slate-400">Sin datos de participación familiar.</p>
+            )}
+          </div>
+        </div>
+
+        <div className="xl:col-span-5 rounded-[32px] border border-white bg-white/85 p-6 shadow-xl backdrop-blur-xl">
           <h3 className="mb-4 flex items-center gap-2 font-display text-base font-black text-slate-900">
             <ChartBar size={18} className="text-blue-500" /> Distribución de respuestas
           </h3>
           <div className="grid grid-cols-3 gap-4">
             <div className="flex flex-col items-center justify-center rounded-2xl bg-emerald-50 p-4 text-center">
               <span className="mb-1 text-[10px] font-black uppercase tracking-widest text-emerald-600">Promotores</span>
-              <span className={`${isExecutiveAllSchoolsView ? "text-4xl" : "text-3xl"} font-black text-emerald-500`}>{stats.promoters}</span>
+              <span className="text-3xl font-black text-emerald-500">{stats.promoters}</span>
               <span className="mt-1 text-xs font-bold text-emerald-400">{percentage(stats.promoters, stats.total)}%</span>
             </div>
             <div className="flex flex-col items-center justify-center rounded-2xl bg-amber-50 p-4 text-center">
               <span className="mb-1 text-[10px] font-black uppercase tracking-widest text-amber-600">Satisfechos</span>
-              <span className={`${isExecutiveAllSchoolsView ? "text-4xl" : "text-3xl"} font-black text-amber-500`}>{stats.passives}</span>
+              <span className="text-3xl font-black text-amber-500">{stats.passives}</span>
               <span className="mt-1 text-xs font-bold text-amber-400">{percentage(stats.passives, stats.total)}%</span>
             </div>
             <div className="flex flex-col items-center justify-center rounded-2xl bg-red-50 p-4 text-center">
               <span className="mb-1 text-[10px] font-black uppercase tracking-widest text-red-600">Insatisfechos</span>
-              <span className={`${isExecutiveAllSchoolsView ? "text-4xl" : "text-3xl"} font-black text-red-500`}>{stats.detractors}</span>
+              <span className="text-3xl font-black text-red-500">{stats.detractors}</span>
               <span className="mt-1 text-xs font-bold text-red-400">{percentage(stats.detractors, stats.total)}%</span>
             </div>
           </div>
         </div>
       </div>
 
-      {familyParticipationLoading && (
-        <div className="rounded-[22px] border border-white bg-white/85 p-4 shadow-sm backdrop-blur-xl">
-          <div className="flex items-center gap-3">
-            <CircleNotch size={16} weight="bold" className="animate-spin text-blue-600" />
-            <p className="text-xs font-black text-slate-600">Cargando participación familiar...</p>
-          </div>
-        </div>
-      )}
-
-      {familyParticipationExecutive && (
-        <div className="rounded-[22px] border border-white bg-white/90 p-4 shadow-sm backdrop-blur-xl">
-          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+      {(sharedFamiliesLoading || sharedFamilies) && (
+        <div className="rounded-[24px] border border-sky-100 bg-sky-50/80 p-5 shadow-sm">
+          <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
             <div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="rounded-full bg-blue-50 px-3 py-1 text-[10px] font-black uppercase tracking-widest text-blue-700">
-                  Participación familiar
-                </span>
-                {activeSchool === "Todos los colegios" && (
-                  <span className="rounded-full bg-slate-100 px-3 py-1 text-[10px] font-black uppercase tracking-widest text-slate-500">
-                    Resumen por colegio
-                  </span>
-                )}
-              </div>
-
-              <h3 className="mt-2 font-display text-base font-black text-slate-950">
-                Cobertura familiar de la encuesta
-              </h3>
-
-              <p className="mt-1 text-xs font-semibold leading-relaxed text-slate-500">
-                Estos datos cuentan familias, no encuestas individuales. Si respondieron madre y padre, la familia cuenta una sola vez en “familias con respuesta”.
+              <p className="text-[10px] font-black uppercase tracking-widest text-sky-700">
+                Dónde más tienen hijos estas familias
+              </p>
+              <p className="mt-1 text-xs font-semibold text-sky-900">
+                Muestra los recorridos familiares dentro del mismo polo.
               </p>
             </div>
-
-            <HelpTip
-              title="Cómo leer estos datos"
-              body="Familias con respuesta: al menos respondió madre o padre. Solo madre: respondió la madre y no el padre. Solo padre: respondió el padre y no la madre. Ambos: respondieron madre y padre de la misma familia."
-            />
+            {sharedFamilies?.year && (
+              <p className="text-[11px] font-bold text-sky-700">Año {sharedFamilies.year}</p>
+            )}
           </div>
 
-          <div className="mt-3 rounded-2xl border border-blue-100 bg-blue-50/70 p-3">
-            <p className="text-xs font-black text-blue-900">
-              Lectura correcta: son familias alcanzadas, no cantidad total de respuestas.
+          {sharedFamiliesLoading && !sharedFamilies?.resumen ? (
+            <p className="mt-4 rounded-xl border border-sky-100 bg-white px-3 py-2 text-xs font-black text-sky-700">
+              Calculando composición entre colegios...
             </p>
-            <p className="mt-1 text-[11px] font-semibold leading-relaxed text-blue-700">
-              “Familias con respuesta” = solo madre + solo padre + ambos.
+          ) : !sharedFamilies?.resumen ? (
+            <p className="mt-4 rounded-xl border border-amber-100 bg-white px-3 py-2 text-xs font-black text-amber-700">
+              {sharedFamilies?.mensaje || "No se encontró composición familiar para este colegio/año."}
             </p>
-          </div>
-
-          <div className="mt-4 grid grid-cols-2 gap-2 lg:grid-cols-5">
-            <div className="rounded-2xl border border-blue-100 bg-blue-50/70 px-3 py-3">
-              <p className="text-[9px] font-black uppercase tracking-widest text-blue-600">Familias con respuesta</p>
-              <p className="mt-1 text-2xl font-black text-slate-950">{familyParticipationExecutive.familiasConRespuesta}</p>
-              <p className="mt-0.5 text-[10px] font-bold text-slate-500">
-                {familyParticipationExecutive.participationPct}% de {familyParticipationExecutive.totalFamilias}
-              </p>
-            </div>
-
-            <div className="rounded-2xl border border-pink-100 bg-pink-50/70 px-3 py-3">
-              <p className="text-[9px] font-black uppercase tracking-widest text-pink-600">Solo madre</p>
-              <p className="mt-1 text-2xl font-black text-pink-700">{familyParticipationExecutive.soloMadre}</p>
-              <p className="mt-0.5 text-[10px] font-bold text-pink-600">Respondió madre, no padre</p>
-            </div>
-
-            <div className="rounded-2xl border border-indigo-100 bg-indigo-50/70 px-3 py-3">
-              <p className="text-[9px] font-black uppercase tracking-widest text-indigo-600">Solo padre</p>
-              <p className="mt-1 text-2xl font-black text-indigo-700">{familyParticipationExecutive.soloPadre}</p>
-              <p className="mt-0.5 text-[10px] font-bold text-indigo-600">Respondió padre, no madre</p>
-            </div>
-
-            <div className="rounded-2xl border border-violet-100 bg-violet-50/70 px-3 py-3">
-              <p className="text-[9px] font-black uppercase tracking-widest text-violet-600">Respondieron ambos</p>
-              <p className="mt-1 text-2xl font-black text-violet-700">{familyParticipationExecutive.ambos}</p>
-              <p className="mt-0.5 text-[10px] font-bold text-violet-600">Madre y padre</p>
-            </div>
-
-
-          </div>
-
-          {visibleChildrenComposition && visibleChildrenComposition.totalFamilias > 0 && (
-            <div className="mt-4 rounded-2xl border border-amber-100 bg-amber-50/70 p-4">
-              <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
-                <div>
-                  <p className="text-[10px] font-black uppercase tracking-widest text-amber-700">
-                    {activeSchool === "Todos los colegios" ? "Hijos por familia por colegio" : "Hijos por familia en tu colegio"}
-                  </p>
-                  <p className="mt-1 text-xs font-semibold text-amber-900">
-                    {activeSchool === "Todos los colegios"
-                      ? "Muestra el universo de familias agrupado por cantidad de hijos dentro de cada colegio del proyecto."
-                      : `Cuenta familias del universo cargado según cuántos hijos tienen dentro de ${activeSchool || ownSchool || "tu colegio"}.`}
-                  </p>
-                </div>
-                <p className="text-[11px] font-bold text-amber-700">
-                  Promedio: {visibleChildrenComposition.promedioHijos} hijos por familia
-                </p>
-              </div>
-
-              <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
-                <div className="rounded-xl border border-amber-100 bg-white px-3 py-2">
-                  <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">1 hijo</p>
-                  <p className="mt-1 text-xl font-black text-slate-900">{visibleChildrenComposition.unHijo}</p>
-                  <p className="text-[10px] font-semibold text-slate-500">familias</p>
-                </div>
-                <div className="rounded-xl border border-amber-100 bg-white px-3 py-2">
-                  <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">2 hijos</p>
-                  <p className="mt-1 text-xl font-black text-slate-900">{visibleChildrenComposition.dosHijos}</p>
-                  <p className="text-[10px] font-semibold text-slate-500">familias</p>
-                </div>
-                <div className="rounded-xl border border-amber-100 bg-white px-3 py-2">
-                  <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">3 hijos</p>
-                  <p className="mt-1 text-xl font-black text-slate-900">{visibleChildrenComposition.tresHijos}</p>
-                  <p className="text-[10px] font-semibold text-slate-500">familias</p>
-                </div>
-                <div className="rounded-xl border border-amber-100 bg-white px-3 py-2">
-                  <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">4 o más</p>
-                  <p className="mt-1 text-xl font-black text-slate-900">{visibleChildrenComposition.cuatroOMas}</p>
-                  <p className="text-[10px] font-semibold text-slate-500">familias</p>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {(sharedFamiliesLoading || sharedFamilies) && (
-            <div className="mt-4 rounded-2xl border border-sky-100 bg-sky-50/80 p-4">
-              <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
-                <div>
-                  <p className="text-[10px] font-black uppercase tracking-widest text-sky-700">
-                    Dónde más tienen hijos estas familias
-                  </p>
-                  <p className="mt-1 text-xs font-semibold text-sky-900">
-                    Muestra cómo se distribuyen estas familias dentro del mismo polo: si están solo en este colegio o si comparten hijos con los otros colegios del polo.
-                  </p>
-                </div>
-                {sharedFamilies?.year && (
-                  <p className="text-[11px] font-bold text-sky-700">Año {sharedFamilies.year}</p>
-                )}
-              </div>
-
-              {sharedFamiliesLoading && !sharedFamilies?.resumen ? (
-                <p className="mt-3 rounded-xl border border-sky-100 bg-white px-3 py-2 text-xs font-black text-sky-700">
-                  Calculando composición entre colegios...
-                </p>
-              ) : !sharedFamilies?.resumen ? (
-                <p className="mt-3 rounded-xl border border-amber-100 bg-white px-3 py-2 text-xs font-black text-amber-700">
-                  {sharedFamilies?.mensaje || "No se encontró composición familiar para este colegio/año. Revisá que estén cargadas y confirmadas las bases de varones, mujeres y jardines del mismo año."}
-                </p>
-              ) : (
-                <>
-
-                  <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
-                    <div className="rounded-xl border border-sky-100 bg-white px-3 py-2">
-                      <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">Solo {shortSchoolName(sharedFamiliesDisplaySchool)}</p>
-                      <p className="mt-1 text-xl font-black text-slate-900">{sharedFamilies?.resumen?.soloEsteColegio ?? 0}</p>
-                      <p className="text-[10px] font-semibold text-slate-500">familias</p>
-                    </div>
-                    <div className="rounded-xl border border-sky-100 bg-white px-3 py-2">
-                      <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">Comparten con otro colegio del polo</p>
-                      <p className="mt-1 text-xl font-black text-slate-900">{sharedFamiliesSharedTotal}</p>
-                      <p className="text-[10px] font-semibold text-slate-500">familias compartidas</p>
-                    </div>
-                    <div className="rounded-xl border border-sky-100 bg-white px-3 py-2">
-                      <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">En los 3 colegios del polo</p>
-                      <p className="mt-1 text-xl font-black text-slate-900">{sharedFamilies?.resumen?.esteMasDosOMasColegios ?? 0}</p>
-                      <p className="text-[10px] font-semibold text-slate-500">familias</p>
-                    </div>
-                  </div>
-
-                  {sharedFamilyOtherSchoolCards.length > 0 && (
-                    <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2">
-                      {sharedFamilyOtherSchoolCards.map((item) => (
-                        <div key={item.label} className="rounded-xl border border-sky-100 bg-white px-3 py-2">
-                          <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">{item.label}</p>
-                          <p className="mt-1 text-lg font-black text-sky-800">{item.value}</p>
-                          <p className="text-[10px] font-semibold text-slate-500">familias compartidas</p>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {Array.isArray(sharedFamilies?.combinaciones) && sharedFamilies.combinaciones.length > 0 && (
-                    <div className="mt-4 overflow-x-auto rounded-2xl border border-sky-100 bg-white">
-                      <div className="bg-sky-50 px-3 py-2">
-                        <p className="text-[10px] font-black uppercase tracking-widest text-sky-700">Detalle de recorridos familiares</p>
-                      </div>
-                      <table className="min-w-full text-xs">
-                        <thead className="bg-white text-slate-500">
-                          <tr>
-                            <th className="px-3 py-2 text-left font-black uppercase tracking-widest">Recorrido familiar</th>
-                            <th className="px-3 py-2 text-right font-black uppercase tracking-widest">Familias</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {sharedFamilies.combinaciones.map((item: any) => (
-                            <tr key={item.label} className="border-t border-sky-50 text-slate-700">
-                              <td className="px-3 py-2 font-bold">{item.label}</td>
-                              <td className="px-3 py-2 text-right font-black text-sky-800">{item.familias}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-          )}
-
-
-          {activeSchool === "Todos los colegios" && (
-          <div className="mt-4 overflow-x-auto rounded-2xl border border-slate-100 bg-white">
-            <table className="min-w-full text-xs">
-              <thead className="bg-slate-50 text-slate-500">
-                <tr>
-                  <th className="px-3 py-2 text-left font-black uppercase tracking-widest">Colegio</th>
-                  <th className="px-3 py-2 text-right font-black uppercase tracking-widest">Familias</th>
-                  <th className="px-3 py-2 text-right font-black uppercase tracking-widest">1 hijo</th>
-                  <th className="px-3 py-2 text-right font-black uppercase tracking-widest">2 hijos</th>
-                  <th className="px-3 py-2 text-right font-black uppercase tracking-widest">3 hijos</th>
-                  <th className="px-3 py-2 text-right font-black uppercase tracking-widest">4+</th>
-                  <th className="px-3 py-2 text-right font-black uppercase tracking-widest">Con respuesta</th>
-                  <th className="px-3 py-2 text-right font-black uppercase tracking-widest">Solo madre</th>
-                  <th className="px-3 py-2 text-right font-black uppercase tracking-widest">Solo padre</th>
-                  <th className="px-3 py-2 text-right font-black uppercase tracking-widest">Ambos</th>
-                  <th className="px-3 py-2 text-right font-black uppercase tracking-widest">% familias</th>
-                </tr>
-              </thead>
-              <tbody>
-                {visibleFamilySchools.map((school: any) => (
-                  <tr key={school.colegio} className="border-t border-slate-100 text-slate-700">
-                    <td className="px-3 py-2 font-black text-slate-900">{school.colegio}</td>
-                    <td className="px-3 py-2 text-right font-bold">{school.totalFamilias}</td>
-                    <td className="px-3 py-2 text-right font-bold text-amber-700">{school.hijosPorFamilia?.unHijo ?? 0}</td>
-                    <td className="px-3 py-2 text-right font-bold text-amber-700">{school.hijosPorFamilia?.dosHijos ?? 0}</td>
-                    <td className="px-3 py-2 text-right font-bold text-amber-700">{school.hijosPorFamilia?.tresHijos ?? 0}</td>
-                    <td className="px-3 py-2 text-right font-bold text-amber-700">{school.hijosPorFamilia?.cuatroOMas ?? 0}</td>
-                    <td className="px-3 py-2 text-right font-black text-blue-700">{school.familiasConRespuesta}</td>
-                    <td className="px-3 py-2 text-right font-bold text-pink-700">{school.soloMadre}</td>
-                    <td className="px-3 py-2 text-right font-bold text-indigo-700">{school.soloPadre}</td>
-                    <td className="px-3 py-2 text-right font-bold text-violet-700">{school.ambos}</td>
-                    <td className="px-3 py-2 text-right font-black text-slate-900">{school.porcentajeParticipacion}%</td>
+          ) : Array.isArray(sharedFamilies?.combinaciones) && sharedFamilies.combinaciones.length > 0 ? (
+            <div className="mt-4 overflow-x-auto rounded-2xl border border-sky-100 bg-white">
+              <table className="min-w-full text-xs">
+                <thead className="bg-sky-50 text-sky-800">
+                  <tr>
+                    <th className="px-3 py-3 text-left font-black uppercase tracking-widest">Recorrido familiar</th>
+                    <th className="px-3 py-3 text-right font-black uppercase tracking-widest">Familias</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {sharedFamilies.combinaciones.map((item: any) => (
+                    <tr key={item.label} className="border-t border-sky-50 text-slate-700">
+                      <td className="px-3 py-3 font-bold">{item.label}</td>
+                      <td className="px-3 py-3 text-right font-black text-sky-800">{item.familias}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="mt-4 rounded-xl border border-sky-100 bg-white px-3 py-2 text-xs font-black text-sky-700">
+              No hay recorridos familiares para mostrar.
+            </p>
           )}
-
         </div>
       )}
 
@@ -2015,71 +1839,36 @@ export default function DirectorDashboard({
         </div>
       </div>
 
-      {/* GRÁFICOS DE ANÁLISIS DE TAGS (POSITIVOS VS NEGATIVOS) */}
-      <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-         {/* TOP ASPECTOS VALORADOS */}
-         <div className="rounded-[32px] border border-white bg-white/85 p-6 shadow-xl backdrop-blur-xl flex flex-col h-[350px]">
-           <div className="mb-4 flex items-center justify-between border-b border-slate-100 pb-4 shrink-0">
-             <div className="flex items-center gap-3">
-               <div className="rounded-xl bg-emerald-50 p-2 text-emerald-600"><Heart size={20} weight="fill" /></div>
-               <div>
-                 <h3 className="font-display text-base font-black text-slate-900">Aspectos más Valorados</h3>
-                 <p className="text-[10px] font-medium text-slate-400">Temáticas destacadas usando todas las respuestas.</p>
-               </div>
-             </div>
-             <HelpTip
-               title="Aspectos más valorados"
-               body="Fuente: campo “Lo que más valoran” de todas las encuestas. Cuenta menciones por palabras clave de temas en todas las respuestas."
-             />
-           </div>
-           <div className="flex-1 min-h-0">
-             {topPositives.length > 0 ? (
-               <ResponsiveContainer width="100%" height="100%">
-                 <BarChart data={topPositives} layout="vertical" margin={{ top: 0, right: 20, left: 30, bottom: 0 }}>
-                   <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" horizontal={false} />
-                   <XAxis type="number" tick={{ fontSize: 10, fill: "#94A3B8", fontWeight: "bold" }} axisLine={false} tickLine={false} />
-                   <YAxis dataKey="name" type="category" tick={{ fontSize: 10, fill: "#64748B", fontWeight: "bold" }} axisLine={false} tickLine={false} dx={-10} />
-                   <Tooltip cursor={{fill: 'transparent'}} content={<DirectorTooltip />} />
-                   <Bar dataKey="count" name="Menciones Positivas" radius={[0, 6, 6, 0]} barSize={16} fill="#34D399" />
-                 </BarChart>
-               </ResponsiveContainer>
-             ) : (
-                <div className="flex h-full items-center justify-center text-sm font-bold text-slate-400">Sin suficientes menciones positivas para clasificar</div>
-             )}
-           </div>
-         </div>
-
-         {/* TOP Aspectos a mejorar */}
-         <div className="rounded-[32px] border border-white bg-white/85 p-6 shadow-xl backdrop-blur-xl flex flex-col h-[350px]">
-           <div className="mb-4 flex items-center justify-between border-b border-slate-100 pb-4 shrink-0">
-             <div className="flex items-center gap-3">
-               <div className="rounded-xl bg-red-50 p-2 text-red-600"><WarningCircle size={20} weight="fill" /></div>
-               <div>
-                 <h3 className="font-display text-base font-black text-slate-900">Aspectos a mejorar</h3>
-                 <p className="text-[10px] font-medium text-slate-400">Aspectos a mejorar usando todas las respuestas.</p>
-               </div>
-             </div>
-             <HelpTip
-               title="Aspectos a mejorar"
-               body="Fuente: campo “Qué mejorarían” de todas las encuestas. Cuenta menciones por palabras clave de temas en todas las respuestas."
-             />
-           </div>
-           <div className="flex-1 min-h-0">
-             {topComplaints.length > 0 ? (
-               <ResponsiveContainer width="100%" height="100%">
-                 <BarChart data={topComplaints} layout="vertical" margin={{ top: 0, right: 20, left: 30, bottom: 0 }}>
-                   <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" horizontal={false} />
-                   <XAxis type="number" tick={{ fontSize: 10, fill: "#94A3B8", fontWeight: "bold" }} axisLine={false} tickLine={false} />
-                   <YAxis dataKey="name" type="category" tick={{ fontSize: 10, fill: "#64748B", fontWeight: "bold" }} axisLine={false} tickLine={false} dx={-10} />
-                   <Tooltip cursor={{fill: 'transparent'}} content={<DirectorTooltip />} />
-                   <Bar dataKey="count" name="Menciones Negativas" radius={[0, 6, 6, 0]} barSize={16} fill="#F87171" />
-                 </BarChart>
-               </ResponsiveContainer>
-             ) : (
-                <div className="flex h-full items-center justify-center text-sm font-bold text-slate-400">Sin suficientes quejas para clasificar</div>
-             )}
-           </div>
-         </div>
+      {/* ASPECTOS MÁS VALORADOS */}
+      <div className="rounded-[32px] border border-white bg-white/85 p-6 shadow-xl backdrop-blur-xl flex flex-col h-[350px]">
+        <div className="mb-4 flex items-center justify-between border-b border-slate-100 pb-4 shrink-0">
+          <div className="flex items-center gap-3">
+            <div className="rounded-xl bg-emerald-50 p-2 text-emerald-600"><Heart size={20} weight="fill" /></div>
+            <div>
+              <h3 className="font-display text-base font-black text-slate-900">Aspectos más valorados</h3>
+              <p className="text-[10px] font-medium text-slate-400">Temáticas destacadas usando todas las respuestas.</p>
+            </div>
+          </div>
+          <HelpTip
+            title="Aspectos más valorados"
+            body="Fuente: campo “Lo que más valoran” de todas las encuestas. Cuenta menciones por palabras clave de temas en todas las respuestas."
+          />
+        </div>
+        <div className="flex-1 min-h-0">
+          {topPositives.length > 0 ? (
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={topPositives} layout="vertical" margin={{ top: 0, right: 20, left: 30, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" horizontal={false} />
+                <XAxis type="number" tick={{ fontSize: 10, fill: "#94A3B8", fontWeight: "bold" }} axisLine={false} tickLine={false} />
+                <YAxis dataKey="name" type="category" tick={{ fontSize: 10, fill: "#64748B", fontWeight: "bold" }} axisLine={false} tickLine={false} dx={-10} />
+                <Tooltip cursor={{fill: 'transparent'}} content={<DirectorTooltip />} />
+                <Bar dataKey="count" name="Menciones Positivas" radius={[0, 6, 6, 0]} barSize={16} fill="#34D399" />
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="flex h-full items-center justify-center text-sm font-bold text-slate-400">Sin suficientes menciones positivas para clasificar</div>
+          )}
+        </div>
       </div>
 
       {/* LECTURA DE COMENTARIOS */}
@@ -2121,6 +1910,16 @@ export default function DirectorDashboard({
           <div className="rounded-xl border border-indigo-100 bg-indigo-50/60 px-3 py-2 text-xs font-bold text-indigo-700">
             Comentarios marcados en esta sesión: <span className="font-black">{savedCommentIds.length}</span>
           </div>
+          <div className="relative">
+            <MagnifyingGlass size={16} weight="bold" className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              value={commentSearch}
+              onChange={(e) => setCommentSearch(e.target.value)}
+              placeholder="Buscar por nombre, apellido o comentario..."
+              className="w-full rounded-2xl border border-slate-200 bg-white py-3 pl-10 pr-4 text-sm font-bold text-slate-700 outline-none transition-all placeholder:text-slate-400 focus:border-blue-300 focus:ring-4 focus:ring-blue-100"
+            />
+          </div>
+
 
           <div className="flex flex-wrap items-center gap-2">
              <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 mr-2">Perfil:</span>
