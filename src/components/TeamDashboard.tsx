@@ -1125,7 +1125,7 @@ export default function TeamDashboard({
       )}
       
       {/* 1. KPIs */}
-      <div className="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-4 lg:grid-cols-5">
+      <div className="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-4 lg:grid-cols-6">
         <div className="col-span-2 flex items-center gap-5 rounded-[24px] border border-white bg-white/80 px-6 py-5 shadow-xl backdrop-blur-xl sm:col-span-4 lg:col-span-2">
           <div>
             <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">NPS</span>
@@ -1139,6 +1139,13 @@ export default function TeamDashboard({
             <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">respuestas totales</span>
           </div>
         </div>
+        <KpiCard
+          title="Participación familiar"
+          value={`${familyParticipationScopedSummary?.porcentajeParticipacion ?? 0}%`}
+          subtitle={`${familyParticipationScopedSummary?.familiasConRespuesta ?? 0} de ${familyParticipationScopedSummary?.totalFamilias ?? 0} familias`}
+          accent="text-blue-600"
+          icon={<Users size={18} weight="fill" className="text-blue-500" />}
+        />
         <KpiCard title="Promotores" value={stats.promoters} subtitle={`${percentage(stats.promoters, stats.total)}% del total`} accent="text-emerald-600" icon={<Star size={18} weight="fill" className="text-emerald-500" />} />
         <KpiCard title="Satisfechos" value={stats.passives} subtitle={`${percentage(stats.passives, stats.total)}% del total`} accent="text-amber-600" icon={<Smiley size={18} weight="fill" className="text-amber-500" />} />
         <KpiCard title="Insatisfechos" value={stats.detractors} subtitle={`${percentage(stats.detractors, stats.total)}% del total`} accent="text-red-600" icon={<Warning size={18} weight="fill" className="text-red-500" />} />
@@ -1278,38 +1285,7 @@ export default function TeamDashboard({
                 </p>
               ) : activeSchool !== "Todos los colegios" && sharedFamilies?.resumen ? (
                 <>
-
-                  <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
-                    <div className="rounded-xl border border-sky-100 bg-white px-3 py-2">
-                      <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">Solo {shortSchoolName(sharedFamiliesDisplaySchool)}</p>
-                      <p className="mt-1 text-xl font-black text-slate-900">{sharedFamilies.resumen.soloEsteColegio}</p>
-                      <p className="text-[10px] font-semibold text-slate-500">familias</p>
-                    </div>
-                    <div className="rounded-xl border border-sky-100 bg-white px-3 py-2">
-                      <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">Comparten con otro colegio del polo</p>
-                      <p className="mt-1 text-xl font-black text-slate-900">{sharedFamiliesSharedTotal}</p>
-                      <p className="text-[10px] font-semibold text-slate-500">familias compartidas</p>
-                    </div>
-                    <div className="rounded-xl border border-sky-100 bg-white px-3 py-2">
-                      <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">En los 3 colegios del polo</p>
-                      <p className="mt-1 text-xl font-black text-slate-900">{sharedFamilies.resumen.esteMasDosOMasColegios}</p>
-                      <p className="text-[10px] font-semibold text-slate-500">familias</p>
-                    </div>
-                  </div>
-
-                  {sharedFamilyOtherSchoolCards.length > 0 && (
-                    <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2">
-                      {sharedFamilyOtherSchoolCards.map((item) => (
-                        <div key={item.label} className="rounded-xl border border-sky-100 bg-white px-3 py-2">
-                          <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">{item.label}</p>
-                          <p className="mt-1 text-lg font-black text-sky-800">{item.value}</p>
-                          <p className="text-[10px] font-semibold text-slate-500">familias compartidas</p>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {Array.isArray(sharedFamilies.combinaciones) && sharedFamilies.combinaciones.length > 0 && (
+                  {Array.isArray(sharedFamilies.combinaciones) && sharedFamilies.combinaciones.length > 0 ? (
                     <div className="mt-4 overflow-x-auto rounded-2xl border border-sky-100 bg-white">
                       <div className="bg-sky-50 px-3 py-2">
                         <p className="text-[10px] font-black uppercase tracking-widest text-sky-700">Detalle de recorridos familiares</p>
@@ -1331,6 +1307,10 @@ export default function TeamDashboard({
                         </tbody>
                       </table>
                     </div>
+                  ) : (
+                    <p className="mt-3 rounded-xl border border-amber-100 bg-white px-3 py-2 text-xs font-black text-amber-700">
+                      No hay recorridos familiares para mostrar en esta selección.
+                    </p>
                   )}
                 </>
               ) : Array.isArray(sharedFamilies?.porColegio) && sharedFamilies.porColegio.length > 0 ? (
@@ -1345,26 +1325,6 @@ export default function TeamDashboard({
                     <p className="text-[10px] font-black uppercase tracking-widest text-sky-700">
                       {sharedFamilies.porColegio.length} colegios con datos
                     </p>
-                  </div>
-
-                  <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
-                    <div className="rounded-xl border border-sky-100 bg-sky-50/70 px-3 py-2">
-                      <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">Familias analizadas</p>
-                      <p className="mt-1 text-xl font-black text-slate-900">
-                        {sharedFamilies.porColegio.reduce((acc: number, row: any) => acc + getSharedFamiliesTotal(row), 0)}
-                      </p>
-                    </div>
-                    <div className="rounded-xl border border-sky-100 bg-sky-50/70 px-3 py-2">
-                      <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">Familias compartidas</p>
-                      <p className="mt-1 text-xl font-black text-slate-900">
-                        {sharedFamilies.porColegio.reduce((acc: number, row: any) => acc + getSharedFamiliesSharedTotal(row), 0)}
-                      </p>
-                    </div>
-                    <div className="rounded-xl border border-sky-100 bg-sky-50/70 px-3 py-2">
-                      <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">Vista</p>
-                      <p className="mt-1 text-sm font-black text-sky-800">Compacta</p>
-                      <p className="text-[10px] font-semibold text-slate-500">para no agrandar el tablero</p>
-                    </div>
                   </div>
 
                   <div className="mt-4 max-h-72 overflow-y-auto rounded-2xl border border-sky-100 bg-white">

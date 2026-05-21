@@ -54,6 +54,59 @@ export default function DashboardHubPage() {
     return year ? `Panel de ${userSchool} ${year}` : `Panel de ${userSchool}`;
   };
 
+  const normalizeProjectName = (value: string) =>
+    String(value || "")
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[̀-ͯ]/g, "")
+      .trim();
+
+  const getProjectGroup = (projectName: string) => {
+    const name = normalizeProjectName(projectName);
+
+    if (name.includes("varon")) {
+      return {
+        key: "varones",
+        label: "Colegios de varones",
+        description: "Proyectos de colegios de varones ordenados por año.",
+        badgeClass: "bg-blue-50 text-blue-700 border-blue-100",
+        headerClass: "from-blue-50 to-white border-blue-100",
+        order: 1,
+      };
+    }
+
+    if (name.includes("mujer")) {
+      return {
+        key: "mujeres",
+        label: "Colegios de mujeres",
+        description: "Proyectos de colegios de mujeres ordenados por año.",
+        badgeClass: "bg-fuchsia-50 text-fuchsia-700 border-fuchsia-100",
+        headerClass: "from-fuchsia-50 to-white border-fuchsia-100",
+        order: 2,
+      };
+    }
+
+    if (name.includes("jardin")) {
+      return {
+        key: "jardines",
+        label: "Jardines",
+        description: "Proyectos de jardines ordenados por año.",
+        badgeClass: "bg-emerald-50 text-emerald-700 border-emerald-100",
+        headerClass: "from-emerald-50 to-white border-emerald-100",
+        order: 3,
+      };
+    }
+
+    return {
+      key: "otros",
+      label: "Otros proyectos",
+      description: "Otros espacios de trabajo.",
+      badgeClass: "bg-slate-50 text-slate-600 border-slate-100",
+      headerClass: "from-slate-50 to-white border-slate-100",
+      order: 4,
+    };
+  };
+
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -138,7 +191,21 @@ export default function DashboardHubPage() {
     return () => document.removeEventListener("keydown", onKey);
   }, [isProfileOpen]);
 
-  const sorted = useMemo(() => projects, [projects]);
+  const sorted = useMemo(() => {
+    if (!isAdmin) return projects;
+
+    return [...projects].sort((a, b) => {
+      const groupA = getProjectGroup(a.nombre);
+      const groupB = getProjectGroup(b.nombre);
+      if (groupA.order !== groupB.order) return groupA.order - groupB.order;
+
+      const yearA = Number(getProjectYear(a.nombre) || 0);
+      const yearB = Number(getProjectYear(b.nombre) || 0);
+      if (yearA !== yearB) return yearB - yearA;
+
+      return String(a.nombre || "").localeCompare(String(b.nombre || ""));
+    });
+  }, [projects, isAdmin]);
 
   const handleCreate = async () => {
     const n = nombre.trim();
@@ -339,13 +406,31 @@ export default function DashboardHubPage() {
               </button>
             )}
 
-            {sorted.map((p) => {
+            {sorted.map((p, index) => {
               const isSelected = selectedToCompare.includes(p.id);
               const isDisabled = compareMode && selectedToCompare.length === 2 && !isSelected;
 
+              const currentGroup = getProjectGroup(p.nombre);
+              const previousGroup = index > 0 ? getProjectGroup(sorted[index - 1]?.nombre || "") : null;
+              const shouldShowAdminGroupHeader = isAdmin && !compareMode && (!previousGroup || previousGroup.key !== currentGroup.key);
+
               return (
-                <div
-                  key={p.id}
+                <>
+                  {shouldShowAdminGroupHeader && (
+                    <div className={`col-span-full rounded-[24px] border bg-gradient-to-r px-5 py-4 shadow-sm ${currentGroup.headerClass}`}>
+                      <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
+                        <div>
+                          <p className="font-display text-xl font-black tracking-tight text-slate-900">{currentGroup.label}</p>
+                          <p className="mt-1 text-xs font-bold text-slate-500">{currentGroup.description}</p>
+                        </div>
+                        <span className={`w-fit rounded-full border px-3 py-1 text-[10px] font-black uppercase tracking-widest ${currentGroup.badgeClass}`}>
+                          {sorted.filter((item) => getProjectGroup(item.nombre).key === currentGroup.key).length} proyectos
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                  <div
+                    key={p.id}
                   onClick={() => compareMode && toggleCompareSelect(p.id)}
                   className={`group relative flex h-[240px] flex-col justify-between rounded-[32px] border p-6 backdrop-blur-xl shadow-lg transition-all
                     ${compareMode
@@ -463,6 +548,7 @@ export default function DashboardHubPage() {
                     )}
                   </div>
                 </div>
+                </>
               );
             })}
           </div>
