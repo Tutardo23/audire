@@ -951,6 +951,7 @@ function AnalyticsDashboardLive() {
             downloadCSV={downloadCSV}
             projectId={projectId}
             activeSchool={activeSchool}
+            canEditConfig={isAdmin}
           />
         )}
       </main>
@@ -993,7 +994,7 @@ function AnalyticsDashboardLive() {
               </div>
             )}
 
-            {!isDirector && (
+            {isAdmin && (
               <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                 <h4 className="text-sm font-black text-slate-900">Exportación de Datos</h4>
                 <button onClick={downloadCSV} className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-3 text-sm font-bold text-white transition-all hover:bg-slate-800 shadow-md active:scale-95"><DownloadSimple size={16} weight="bold" /> Descargar Excel (CSV)</button>

@@ -37,7 +37,9 @@ import {
 // Ajustá esta ruta dependiendo de dónde esté tu carpeta actions
 import {
   obtenerEncuestasComparacionLigeraDB,
+  obtenerRespuestaHistoricaFamiliaDB,
   listarProyectosDB,
+  listarProyectosComparacionNpsDB,
   obtenerTemasProyectoDB,
   guardarTemasProyectoDB,
   obtenerHistorialTemasProyectoDB,
@@ -331,6 +333,24 @@ const projectTrack = (name?: string | null): "varones" | "mujeres" | "jardin" | 
   return "otro";
 };
 
+const formatCompareYearLabel = (project: any, targetSchool?: string | null) => {
+  const projectName = String(project?.nombre || "").trim();
+  const year = extraerAnio(projectName);
+  const school = String(targetSchool || "").trim();
+
+  if (school) return `${shortSchoolName(school)} ${year}`;
+  return projectName || `Año ${year}`;
+};
+
+const formatCompareTextLabel = (project: any, targetSchool?: string | null) => {
+  const projectName = String(project?.nombre || "").trim();
+  const year = extraerAnio(projectName);
+  const school = String(targetSchool || "").trim();
+
+  if (school) return `${shortSchoolName(school)} ${year}`;
+  return projectName || `año ${year}`;
+};
+
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const highlightText = (text: string, query: string, extraKeywords: string[] = []) => {
@@ -532,34 +552,6 @@ const writeFamilyParticipationCache = (projectId: string | undefined, data: any)
   }
 };
 
-const sharedFamiliesCacheKey = (projectId?: string, school?: string) =>
-  projectId && school ? `apdes:shared-families:${projectId}:${normalize(school)}` : "";
-
-const readSharedFamiliesCache = (projectId?: string, school?: string) => {
-  if (typeof window === "undefined") return null;
-  const key = sharedFamiliesCacheKey(projectId, school);
-  if (!key) return null;
-
-  try {
-    const raw = window.sessionStorage.getItem(key);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
-};
-
-const writeSharedFamiliesCache = (projectId: string | undefined, school: string | undefined, data: any) => {
-  if (typeof window === "undefined" || !data) return;
-  const key = sharedFamiliesCacheKey(projectId, school);
-  if (!key) return;
-
-  try {
-    window.sessionStorage.setItem(key, JSON.stringify(data));
-  } catch {
-    // Si el dato pesa mucho o el navegador bloquea storage, no rompemos la vista.
-  }
-};
-
 const directorCompareCacheKey = (
   currentProjectId: string | undefined,
   compareProjectId: string,
@@ -567,7 +559,7 @@ const directorCompareCacheKey = (
   currentRowsSignature: string,
 ) => {
   if (!currentProjectId || !compareProjectId) return "";
-  return `apdes:director-compare:v2:${currentProjectId}:${compareProjectId}:${normalize(targetSchool || "todos")}:${currentRowsSignature}`;
+  return `apdes:director-compare:v3:${currentProjectId}:${compareProjectId}:${normalize(targetSchool || "todos")}:${currentRowsSignature}`;
 };
 
 const readDirectorCompareCache = (key: string) => {
@@ -753,22 +745,12 @@ export default function DirectorDashboard({
       };
     }
 
-    const cached = readSharedFamiliesCache(projectId, sharedFamiliesTargetSchool);
-    if (cached) {
-      setSharedFamilies(cached);
-      setSharedFamiliesLoading(false);
-      return () => {
-        mounted = false;
-      };
-    }
-
     setSharedFamiliesLoading(true);
 
     obtenerFamiliasCompartidasProyectoDB(projectId, sharedFamiliesTargetSchool)
       .then((data) => {
         if (!mounted) return;
         setSharedFamilies(data);
-        writeSharedFamiliesCache(projectId, sharedFamiliesTargetSchool, data);
       })
       .catch(() => {
         if (!mounted) return;
@@ -852,6 +834,7 @@ export default function DirectorDashboard({
   const [familyTrendFilter, setFamilyTrendFilter] = useState<"all"|"up"|"down"|"flat">("all");
   const [familyPage, setFamilyPage] = useState(1);
   const [selectedFamilyModal, setSelectedFamilyModal] = useState<any | null>(null);
+  const [historicalCommentLoading, setHistoricalCommentLoading] = useState(false);
   const FAMILIES_PER_PAGE = 8;
 
   const currentYear = useMemo(() => getMostFrequentYear(stats.schoolData), [stats.schoolData]);
@@ -860,6 +843,17 @@ export default function DirectorDashboard({
     const match = stats.schoolData.find((r: SurveyRow) => matchesSchoolName(String(r.colegio || ""), activeSchool));
     return String(match?.polo || ownPolo || "");
   }, [stats.schoolData, activeSchool, ownPolo]);
+
+  const compareTargetSchoolLabel = useMemo(() => {
+    if (activeSchool !== "Todos los colegios") return activeSchool;
+    return ownSchool || "";
+  }, [activeSchool, ownSchool]);
+
+  const compareSelectorTitle = compareTargetSchoolLabel ? "Comparar año" : "Comparar contra";
+  const compareSelectorPlaceholder = compareTargetSchoolLabel ? "Seleccioná un año..." : "Seleccioná un proyecto histórico...";
+  const compareSelectorHelp = compareTargetSchoolLabel
+    ? `Se muestran los años disponibles para ${shortSchoolName(compareTargetSchoolLabel)}.`
+    : "Solo se muestran proyectos distintos al actual para evitar comparaciones duplicadas.";
 
   const visibleFamilySchools = useMemo(() => {
     if (!familyParticipationExecutive) return [];
@@ -881,14 +875,31 @@ export default function DirectorDashboard({
   }, [stats.schoolData]);
 
   useEffect(() => {
-    listarProyectosDB().then(data => {
+    let mounted = true;
+
+    Promise.allSettled([listarProyectosDB(), listarProyectosComparacionNpsDB()]).then((results) => {
+       if (!mounted) return;
+
+       const visibleProjects = results[0].status === "fulfilled"
+         ? (Array.isArray(results[0].value) ? results[0].value : ((results[0].value as any)?.rows || []))
+         : [];
+       const compareProjects = results[1].status === "fulfilled"
+         ? (Array.isArray(results[1].value) ? results[1].value : ((results[1].value as any)?.rows || []))
+         : [];
+
+       const mergedMap = new Map<string, any>();
+       [...visibleProjects, ...compareProjects].forEach((p: any) => {
+         if (p?.id) mergedMap.set(String(p.id), p);
+       });
+       const data = Array.from(mergedMap.values());
+
        const currentProjectId = projectId || stats.schoolData[0]?.projectId;
        const currentFromCatalog = data.find((p: any) => String(p?.id) === String(currentProjectId));
        const currentProjectName = String(currentFromCatalog?.nombre || stats.schoolData[0]?.projectName || "");
        const currentProjectNameNorm = normalize(currentProjectName);
        const baseTrack = projectTrack(currentProjectName);
        const baseFiltered = data.filter((p: any) => {
-         if (p.id === currentProjectId) return false;
+         if (String(p.id) === String(currentProjectId)) return false;
          const optionNameNorm = normalize(String(p?.nombre || ""));
          if (currentProjectNameNorm && optionNameNorm === currentProjectNameNorm) return false;
          return true;
@@ -904,10 +915,16 @@ export default function DirectorDashboard({
          : projectsByTrack;
        const filtered = restricted.length > 0 ? restricted : projectsByTrack;
        const ordered = filtered.sort((a: any, b: any) => {
+         const yearDiff = extraerAnio(String(b?.nombre || "")) - extraerAnio(String(a?.nombre || ""));
+         if (yearDiff !== 0) return yearDiff;
          return String(b?.creado_at || "").localeCompare(String(a?.creado_at || ""));
        });
        setAllProjects(ordered);
     });
+
+    return () => {
+      mounted = false;
+    };
   }, [stats.schoolData, allowedCompareProjectIds, projectId]);
 
   // Carga de datos del proyecto a comparar
@@ -947,7 +964,7 @@ export default function DirectorDashboard({
       const rows = Array.isArray(data) ? data : data.rows || [];
       const proyectoComparado = allProjects.find(p => p.id === compareProjectId);
       const anioComparado = extraerAnio(proyectoComparado?.nombre || "");
-      const nombreComparado = proyectoComparado?.nombre || "Proyecto Anterior";
+      const nombreComparado = formatCompareTextLabel(proyectoComparado, compareTargetSchool);
       
       let validRows = rows.map((item: any) => ({
          nombre: String(item.nombre || ""),
@@ -1017,6 +1034,10 @@ export default function DirectorDashboard({
           currentImprovement: currentFam.improvement,
           comparePositive: r.positive,
           compareImprovement: r.improvement,
+          compareNombre: r.nombre,
+          compareApellido: r.apellido,
+          compareColegio: r.colegio,
+          compareCurso: r.curso,
           trend,
         });
       });
@@ -1458,6 +1479,41 @@ export default function DirectorDashboard({
   const familyTotalPages = Math.ceil(filteredFamilies.length / FAMILIES_PER_PAGE);
   const paginatedFamilies = filteredFamilies.slice((familyPage - 1) * FAMILIES_PER_PAGE, familyPage * FAMILIES_PER_PAGE);
 
+
+  const openFamilyComparisonModal = (family: any) => {
+    setSelectedFamilyModal(family);
+
+    const alreadyHasHistoricalText =
+      String(family?.comparePositive || "").trim().length > 3 ||
+      String(family?.compareImprovement || "").trim().length > 3;
+
+    if (!compareProjectId || alreadyHasHistoricalText) {
+      setHistoricalCommentLoading(false);
+      return;
+    }
+
+    setHistoricalCommentLoading(true);
+    obtenerRespuestaHistoricaFamiliaDB(compareProjectId, {
+      nombre: family?.compareNombre || family?.nombre?.split(" ")?.[0] || "",
+      apellido: family?.compareApellido || "",
+      colegio: family?.compareColegio || sharedFamiliesDisplaySchool || activeSchool,
+      curso: family?.compareCurso || "",
+    })
+      .then((historical) => {
+        if (!historical) return;
+        setSelectedFamilyModal((current: any) => {
+          if (!current || current.nombre !== family.nombre) return current;
+          return {
+            ...current,
+            comparePositive: historical.positive || current.comparePositive || "",
+            compareImprovement: historical.improvement || current.compareImprovement || "",
+          };
+        });
+      })
+      .catch(() => undefined)
+      .finally(() => setHistoricalCommentLoading(false));
+  };
+
   return (
     <div className="space-y-6 relative">
       
@@ -1490,11 +1546,11 @@ export default function DirectorDashboard({
                    <div className="space-y-5 h-[300px] overflow-y-auto pr-2 custom-scrollbar">
                      <div>
                        <p className="text-[10px] font-black uppercase text-emerald-600 mb-1.5 flex items-center gap-1.5"><ThumbsUp size={14} weight="fill"/> Lo que valoraba</p>
-                       <p className="text-sm font-medium text-slate-600 leading-relaxed italic bg-slate-50 p-3 rounded-xl border border-slate-100">&ldquo;{selectedFamilyModal.comparePositive || "Sin comentario cargado en este campo"}&rdquo;</p>
+                       <p className="text-sm font-medium text-slate-600 leading-relaxed italic bg-slate-50 p-3 rounded-xl border border-slate-100">&ldquo;{historicalCommentLoading ? "Cargando comentario histórico..." : selectedFamilyModal.comparePositive || "Sin comentario cargado en este campo"}&rdquo;</p>
                      </div>
                      <div>
                        <p className="text-[10px] font-black uppercase text-slate-400 mb-1.5 flex items-center gap-1.5"><Wrench size={14} weight="fill"/> Oportunidades de mejora</p>
-                       <p className="text-sm font-medium text-slate-600 leading-relaxed italic bg-slate-50 p-3 rounded-xl border border-slate-100">&ldquo;{selectedFamilyModal.compareImprovement || "Sin comentario cargado en este campo"}&rdquo;</p>
+                       <p className="text-sm font-medium text-slate-600 leading-relaxed italic bg-slate-50 p-3 rounded-xl border border-slate-100">&ldquo;{historicalCommentLoading ? "Cargando comentario histórico..." : selectedFamilyModal.compareImprovement || "Sin comentario cargado en este campo"}&rdquo;</p>
                      </div>
                    </div>
                 </div>
@@ -1649,25 +1705,25 @@ export default function DirectorDashboard({
             </div>
             <HelpTip
               title="Comparativa de impacto"
-              body="Fuente: respuestas cargadas en este proyecto y en el proyecto histórico seleccionado. Compara Participación (cantidad de respuestas) y NPS."
+              body={compareTargetSchoolLabel ? "Fuente: respuestas cargadas en el año actual y en el año histórico seleccionado. Compara Participación (cantidad de respuestas) y NPS." : "Fuente: respuestas cargadas en este proyecto y en el proyecto histórico seleccionado. Compara Participación (cantidad de respuestas) y NPS."}
             />
           </div>
 
           <div className="flex-1 flex flex-col">
             <div className="mb-6 rounded-2xl border border-indigo-100 bg-white/90 p-3">
-              <span className="mb-2 block text-[10px] font-black uppercase tracking-widest text-indigo-500">Comparar contra</span>
+              <span className="mb-2 block text-[10px] font-black uppercase tracking-widest text-indigo-500">{compareSelectorTitle}</span>
               <select 
                 value={compareProjectId} 
                 onChange={(e) => setCompareProjectId(e.target.value)}
                 className="w-full rounded-xl border border-indigo-200 bg-indigo-50/40 px-3 py-2 text-sm font-bold text-slate-800 outline-none cursor-pointer transition-all hover:border-indigo-300 focus:border-indigo-400"
               >
-                <option value="">Seleccioná un proyecto histórico...</option>
+                <option value="">{compareSelectorPlaceholder}</option>
                 {allProjects.map((p) => (
-                  <option key={p.id} value={p.id}>{p.nombre}</option>
+                  <option key={p.id} value={p.id}>{formatCompareYearLabel(p, compareTargetSchoolLabel)}</option>
                 ))}
               </select>
               <p className="mt-2 text-[10px] font-bold uppercase tracking-widest text-slate-400">
-                Solo se muestran proyectos distintos al actual para evitar comparaciones duplicadas.
+                {compareSelectorHelp}
               </p>
             </div>
 
@@ -1759,7 +1815,7 @@ export default function DirectorDashboard({
                                <tr><td colSpan={4} className="text-center py-8 text-xs font-bold text-slate-400">No hay resultados para este filtro.</td></tr>
                             ) : (
                               paginatedFamilies.map((f, i) => (
-                                  <tr key={i} onClick={() => setSelectedFamilyModal(f)} className="border-b border-slate-50 last:border-0 hover:bg-blue-50 cursor-pointer transition-colors group">
+                                  <tr key={i} onClick={() => openFamilyComparisonModal(f)} className="border-b border-slate-50 last:border-0 hover:bg-blue-50 cursor-pointer transition-colors group">
                                     <td className="py-3 pl-4 font-bold text-slate-800 text-xs group-hover:text-blue-700 underline decoration-transparent group-hover:decoration-blue-300 underline-offset-2 transition-all">{f.nombre}</td>
                                     <td className="py-3 text-center font-bold text-slate-400 text-xs">{f.compareScore}</td>
                                     <td className="py-3 text-center font-bold text-slate-800 text-xs">{f.currentScore}</td>
@@ -1799,7 +1855,7 @@ export default function DirectorDashboard({
             ) : compareData && compareData.total === 0 ? (
               <div className="text-center py-8 text-sm font-bold text-red-500 bg-red-50 rounded-xl">El proyecto seleccionado no contiene respuestas válidas (faltan notas).</div>
             ) : (
-              <div className="flex-1 flex items-center justify-center text-sm font-bold text-slate-400">Seleccioná un proyecto arriba para cruzar la base de datos.</div>
+              <div className="flex-1 flex items-center justify-center text-sm font-bold text-slate-400">{compareTargetSchoolLabel ? "Seleccioná un año arriba para cruzar la base de datos." : "Seleccioná un proyecto arriba para cruzar la base de datos."}</div>
             )}
           </div>
         </div>
