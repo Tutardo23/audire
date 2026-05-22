@@ -497,6 +497,34 @@ const writeFamilyParticipationCache = (projectId: string | undefined, data: any)
   }
 };
 
+const sharedFamiliesCacheKey = (projectId?: string, school?: string) =>
+  projectId && school ? `apdes:shared-families:${projectId}:${normalize(school)}` : "";
+
+const readSharedFamiliesCache = (projectId?: string, school?: string) => {
+  if (typeof window === "undefined") return null;
+  const key = sharedFamiliesCacheKey(projectId, school);
+  if (!key) return null;
+
+  try {
+    const raw = window.sessionStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+};
+
+const writeSharedFamiliesCache = (projectId: string | undefined, school: string | undefined, data: any) => {
+  if (typeof window === "undefined" || !data) return;
+  const key = sharedFamiliesCacheKey(projectId, school);
+  if (!key) return;
+
+  try {
+    window.sessionStorage.setItem(key, JSON.stringify(data));
+  } catch {
+    // Si el dato pesa mucho o el navegador bloquea storage, no rompemos la vista.
+  }
+};
+
 type TeamDashboardProps = {
   stats: any;
   filteredResponses: SurveyRow[];
@@ -683,7 +711,7 @@ export default function TeamDashboard({
   useEffect(() => {
     let mounted = true;
 
-    if (!projectId) {
+    if (!projectId || activeSchool === "Todos los colegios") {
       setSharedFamilies(null);
       setSharedFamiliesLoading(false);
       return () => {
@@ -691,7 +719,15 @@ export default function TeamDashboard({
       };
     }
 
-    const targetSchool = activeSchool !== "Todos los colegios" ? activeSchool : "";
+    const targetSchool = activeSchool;
+    const cached = readSharedFamiliesCache(projectId, targetSchool);
+    if (cached) {
+      setSharedFamilies(cached);
+      setSharedFamiliesLoading(false);
+      return () => {
+        mounted = false;
+      };
+    }
 
     setSharedFamiliesLoading(true);
 
@@ -699,6 +735,7 @@ export default function TeamDashboard({
       .then((data) => {
         if (!mounted) return;
         setSharedFamilies(data);
+        writeSharedFamiliesCache(projectId, targetSchool, data);
       })
       .catch(() => {
         if (!mounted) return;

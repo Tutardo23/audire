@@ -36,7 +36,7 @@ import {
 
 // Ajustá esta ruta dependiendo de dónde esté tu carpeta actions
 import {
-  obtenerEncuestasDB,
+  obtenerEncuestasComparacionLigeraDB,
   listarProyectosDB,
   obtenerTemasProyectoDB,
   guardarTemasProyectoDB,
@@ -532,6 +532,34 @@ const writeFamilyParticipationCache = (projectId: string | undefined, data: any)
   }
 };
 
+const sharedFamiliesCacheKey = (projectId?: string, school?: string) =>
+  projectId && school ? `apdes:shared-families:${projectId}:${normalize(school)}` : "";
+
+const readSharedFamiliesCache = (projectId?: string, school?: string) => {
+  if (typeof window === "undefined") return null;
+  const key = sharedFamiliesCacheKey(projectId, school);
+  if (!key) return null;
+
+  try {
+    const raw = window.sessionStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+};
+
+const writeSharedFamiliesCache = (projectId: string | undefined, school: string | undefined, data: any) => {
+  if (typeof window === "undefined" || !data) return;
+  const key = sharedFamiliesCacheKey(projectId, school);
+  if (!key) return;
+
+  try {
+    window.sessionStorage.setItem(key, JSON.stringify(data));
+  } catch {
+    // Si el dato pesa mucho o el navegador bloquea storage, no rompemos la vista.
+  }
+};
+
 const directorCompareCacheKey = (
   currentProjectId: string | undefined,
   compareProjectId: string,
@@ -725,12 +753,22 @@ export default function DirectorDashboard({
       };
     }
 
+    const cached = readSharedFamiliesCache(projectId, sharedFamiliesTargetSchool);
+    if (cached) {
+      setSharedFamilies(cached);
+      setSharedFamiliesLoading(false);
+      return () => {
+        mounted = false;
+      };
+    }
+
     setSharedFamiliesLoading(true);
 
     obtenerFamiliasCompartidasProyectoDB(projectId, sharedFamiliesTargetSchool)
       .then((data) => {
         if (!mounted) return;
         setSharedFamilies(data);
+        writeSharedFamiliesCache(projectId, sharedFamiliesTargetSchool, data);
       })
       .catch(() => {
         if (!mounted) return;
@@ -903,7 +941,7 @@ export default function DirectorDashboard({
     let cancelled = false;
     setCompareLoading(true);
 
-    obtenerEncuestasDB(compareProjectId).then((data: any) => {
+    obtenerEncuestasComparacionLigeraDB(compareProjectId).then((data: any) => {
       if (cancelled) return;
 
       const rows = Array.isArray(data) ? data : data.rows || [];

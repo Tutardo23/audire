@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import Papa from "papaparse";
@@ -310,7 +310,6 @@ function AnalyticsDashboardLive() {
   const [connectedProjectIds, setConnectedProjectIds] = useState<string[]>([]);
   const [connectedRows, setConnectedRows] = useState<SurveyRow[]>([]);
   const [connectedRowsLoading, setConnectedRowsLoading] = useState(true);
-  const connectedRowsRequestKeyRef = useRef<string>("");
 
   // Equipo state
   const [searchTerm, setSearchTerm] = useState("");
@@ -574,17 +573,6 @@ function AnalyticsDashboardLive() {
     let cancelled = false;
 
     const ids = effectiveCompareProjectIds.map(String).sort();
-    const projectNamesKey = ids
-      .map((id) => `${id}:${allProjects.find((p) => String(p.id) === String(id))?.nombre || ""}`)
-      .join("|");
-    const requestKey = `${ids.join("|")}::${projectNamesKey}`;
-
-    if (requestKey && connectedRowsRequestKeyRef.current === requestKey && connectedRows.length > 0) {
-      setConnectedRowsLoading(false);
-      return () => {
-        cancelled = true;
-      };
-    }
 
     async function loadConnectedRows() {
       if (ids.length === 0) {
@@ -593,9 +581,8 @@ function AnalyticsDashboardLive() {
         return;
       }
 
-      // Importante: no usamos cache persistente acá. Si queda un cache viejo vacío, el NPS comparativo
-      // parece “no hacer nada”. Solo evitamos repetir la misma carga dentro de esta pantalla abierta.
-      connectedRowsRequestKeyRef.current = requestKey;
+      // Importante: no usamos cache acá. Si queda un cache viejo vacío, el NPS comparativo
+      // parece “no hacer nada”. La consulta ahora es liviana, así que conviene pedirla real.
       setConnectedRowsLoading(true);
 
       try {
@@ -788,7 +775,7 @@ function AnalyticsDashboardLive() {
         <div className="flex items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
             {showBack && (
-              <Link prefetch={false} href="/dashboard" className="hidden items-center gap-2 rounded-xl border border-white bg-white/60 px-3 py-2 text-sm font-bold text-slate-700 backdrop-blur-xl transition-all hover:bg-white hover:shadow-lg md:flex">
+              <Link href="/dashboard" className="hidden items-center gap-2 rounded-xl border border-white bg-white/60 px-3 py-2 text-sm font-bold text-slate-700 backdrop-blur-xl transition-all hover:bg-white hover:shadow-lg md:flex">
                 <ArrowLeft size={18} weight="bold" className="text-blue-700" />
                 <span className="hidden sm:inline">Volver</span>
               </Link>
@@ -890,7 +877,7 @@ function AnalyticsDashboardLive() {
         </div>
         <div className="mt-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div className="md:hidden">
-            <Link prefetch={false} href="/dashboard" className="flex w-full items-center justify-center gap-2 rounded-xl border border-white bg-white/60 px-4 py-2.5 text-sm font-bold text-slate-700 backdrop-blur-xl transition-all hover:bg-white">
+            <Link href="/dashboard" className="flex w-full items-center justify-center gap-2 rounded-xl border border-white bg-white/60 px-4 py-2.5 text-sm font-bold text-slate-700 backdrop-blur-xl transition-all hover:bg-white">
               <ArrowLeft size={18} weight="bold" className="text-blue-700" /> Volver al Hub
             </Link>
           </div>
@@ -898,7 +885,7 @@ function AnalyticsDashboardLive() {
             <ViewModeSwitch viewMode={viewMode} setViewMode={setViewMode} />
           ) : (
             <div className="rounded-2xl bg-slate-100 px-4 py-2 text-xs font-black uppercase tracking-widest text-slate-500">
-              {isTeam ? "Perfil Equipo" : "Perfil Dirección"}
+              {isDirector ? "Perfil Dirección" : "Perfil Equipo"}
             </div>
           )}
         </div>
@@ -917,7 +904,7 @@ function AnalyticsDashboardLive() {
           <p className="text-sm font-medium text-slate-500 mb-8 leading-relaxed">
             Selecciona una encuesta desde el Hub Principal para comenzar el análisis.
           </p>
-          <Link prefetch={false} href="/dashboard" className="flex w-full items-center justify-center gap-2 rounded-2xl bg-blue-600 py-4 text-[15px] font-black text-white transition-all hover:bg-blue-700 active:scale-95">
+          <Link href="/dashboard" className="flex w-full items-center justify-center gap-2 rounded-2xl bg-blue-600 py-4 text-[15px] font-black text-white transition-all hover:bg-blue-700 active:scale-95">
             <ArrowLeft size={18} weight="bold" /> Regresar al Hub
           </Link>
         </div>
@@ -981,7 +968,7 @@ function AnalyticsDashboardLive() {
               <button onClick={() => setIsMenuOpen(false)} className="flex items-center gap-2 rounded-xl bg-white border border-slate-200 px-3 py-2 text-sm font-bold text-slate-700 transition-all hover:bg-slate-50 shadow-sm"><X size={15} weight="bold" /> Cerrar</button>
             </div>
             
-            <Link prefetch={false} href="/dashboard" onClick={() => setIsMenuOpen(false)} className="mb-4 flex items-center justify-center gap-2 rounded-2xl bg-blue-600 text-white p-4 text-sm font-black shadow-md shadow-blue-500/30 transition-all hover:bg-blue-700 active:scale-95"><ArrowLeft size={18} weight="bold" /> Volver al Hub Principal</Link>
+            <Link href="/dashboard" onClick={() => setIsMenuOpen(false)} className="mb-4 flex items-center justify-center gap-2 rounded-2xl bg-blue-600 text-white p-4 text-sm font-black shadow-md shadow-blue-500/30 transition-all hover:bg-blue-700 active:scale-95"><ArrowLeft size={18} weight="bold" /> Volver al Hub Principal</Link>
             
             {isAdmin && (
               <div className="mb-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -993,9 +980,9 @@ function AnalyticsDashboardLive() {
             )}
 
             <div className={`mb-4 grid gap-3 ${isDirector ? "grid-cols-1" : "grid-cols-2"}`}>
-              <Link prefetch={false} href={`/dashboard/analytics?projectId=${projectId}`} onClick={() => setIsMenuOpen(false)} className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white p-5 text-sm font-black text-slate-700 shadow-sm transition-all hover:bg-slate-50 hover:text-indigo-600 hover:border-indigo-200"><ChartBar size={24} weight="fill" className="text-indigo-500" /> Analítica Avanzada</Link>
-              {canViewTeam && (
-                <Link prefetch={false} href={`/dashboard/reports?projectId=${projectId}`} onClick={() => setIsMenuOpen(false)} className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white p-5 text-sm font-black text-slate-700 shadow-sm transition-all hover:bg-slate-50 hover:text-red-600 hover:border-red-200"><FilePdf size={24} weight="fill" className="text-red-500" /> Generar Informes</Link>
+              <Link href={`/dashboard/analytics?projectId=${projectId}`} onClick={() => setIsMenuOpen(false)} className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white p-5 text-sm font-black text-slate-700 shadow-sm transition-all hover:bg-slate-50 hover:text-indigo-600 hover:border-indigo-200"><ChartBar size={24} weight="fill" className="text-indigo-500" /> Analítica Avanzada</Link>
+              {!isDirector && (
+                <Link href={`/dashboard/reports?projectId=${projectId}`} onClick={() => setIsMenuOpen(false)} className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white p-5 text-sm font-black text-slate-700 shadow-sm transition-all hover:bg-slate-50 hover:text-red-600 hover:border-red-200"><FilePdf size={24} weight="fill" className="text-red-500" /> Generar Informes</Link>
               )}
             </div>
 
@@ -1006,7 +993,7 @@ function AnalyticsDashboardLive() {
               </div>
             )}
 
-            {canViewTeam && (
+            {!isDirector && (
               <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                 <h4 className="text-sm font-black text-slate-900">Exportación de Datos</h4>
                 <button onClick={downloadCSV} className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-3 text-sm font-bold text-white transition-all hover:bg-slate-800 shadow-md active:scale-95"><DownloadSimple size={16} weight="bold" /> Descargar Excel (CSV)</button>
