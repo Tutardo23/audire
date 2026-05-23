@@ -26,6 +26,7 @@ import {
   obtenerConfiguracionEquipoProyectoDB,
   guardarConfiguracionEquipoProyectoDB,
   obtenerFamiliasCompartidasProyectoDB,
+  obtenerComentarioCompletoEncuestaDB,
 } from "../app/actions";
 
 // ─────────────────────────────────────────────
@@ -498,7 +499,9 @@ const writeFamilyParticipationCache = (projectId: string | undefined, data: any)
 };
 
 const sharedFamiliesCacheKey = (projectId?: string, school?: string) =>
-  projectId && school ? `apdes:shared-families:${projectId}:${normalize(school)}` : "";
+  projectId && school && school !== "Todos los colegios"
+    ? `apdes:shared-families:${projectId}:${normalize(school)}`
+    : "";
 
 const readSharedFamiliesCache = (projectId?: string, school?: string) => {
   if (typeof window === "undefined") return null;
@@ -564,6 +567,8 @@ export default function TeamDashboard({
   const [savedFilter, setSavedFilter] = useState<"all" | "saved">("all");
   const [sessionSeed] = useState<number>(() => Date.now());
   const [selectedDetail, setSelectedDetail] = useState<SurveyRow | null>(null);
+  const [selectedDetailLoading, setSelectedDetailLoading] = useState(false);
+  const loadedFullCommentIdsRef = useRef<Set<string>>(new Set());
   const [selectedRadarTopic, setSelectedRadarTopic] = useState<string | null>(null);
   const [toneSeed, setToneSeed] = useState<number>(() => Date.now());
   const [commentFocusFilter, setCommentFocusFilter] = useState<FilterType>("Todos");
@@ -651,23 +656,25 @@ export default function TeamDashboard({
     return aggregateChildrenComposition(familyChildrenRows);
   }, [familyChildrenRows]);
 
-  const sharedFamilyRelationCards = useMemo(() => {
-    if (!sharedFamilies?.resumen || activeSchool === "Todos los colegios") return [];
-    return getSharedFamilyRelationCards(activeSchool, sharedFamilies.resumen);
-  }, [sharedFamilies, activeSchool]);
+  const selectedSchoolForSharedFamilies = activeSchool !== "Todos los colegios" ? activeSchool : "";
 
   const sharedFamiliesDisplaySchool = useMemo(() => {
-    if (!sharedFamilies?.resumen || activeSchool === "Todos los colegios") return activeSchool;
-    return String(sharedFamilies.resumen.colegio || activeSchool || "este colegio");
-  }, [sharedFamilies, activeSchool]);
+    if (!sharedFamilies?.resumen || !selectedSchoolForSharedFamilies) return selectedSchoolForSharedFamilies;
+    return String(sharedFamilies.resumen.colegio || selectedSchoolForSharedFamilies || "este colegio");
+  }, [sharedFamilies, selectedSchoolForSharedFamilies]);
+
+  const sharedFamilyRelationCards = useMemo(() => {
+    if (!sharedFamilies?.resumen || !selectedSchoolForSharedFamilies) return [];
+    return getSharedFamilyRelationCards(selectedSchoolForSharedFamilies, sharedFamilies.resumen);
+  }, [sharedFamilies, selectedSchoolForSharedFamilies]);
 
   const sharedFamiliesTotal = useMemo(() => getSharedFamiliesTotal(sharedFamilies?.resumen), [sharedFamilies]);
   const sharedFamiliesSharedTotal = useMemo(() => getSharedFamiliesSharedTotal(sharedFamilies?.resumen), [sharedFamilies]);
 
   const sharedFamilyOtherSchoolCards = useMemo(() => {
-    if (!sharedFamilies?.resumen || activeSchool === "Todos los colegios") return [];
+    if (!sharedFamilies?.resumen || !sharedFamiliesDisplaySchool) return [];
     return getOtherSchoolCardsFromCombinations(sharedFamiliesDisplaySchool, sharedFamilies.combinaciones).slice(0, 4);
-  }, [sharedFamilies, activeSchool, sharedFamiliesDisplaySchool]);
+  }, [sharedFamilies, sharedFamiliesDisplaySchool]);
 
   useEffect(() => {
     let mounted = true;
@@ -713,7 +720,9 @@ export default function TeamDashboard({
   useEffect(() => {
     let mounted = true;
 
-    if (!projectId || activeSchool === "Todos los colegios") {
+    // Importante: en Equipo NO cargamos este cruce en “Todos los colegios”.
+    // Solo se consulta Neon cuando el usuario selecciona un colegio puntual.
+    if (!projectId || !selectedSchoolForSharedFamilies) {
       setSharedFamilies(null);
       setSharedFamiliesLoading(false);
       return () => {
@@ -721,8 +730,7 @@ export default function TeamDashboard({
       };
     }
 
-    const targetSchool = activeSchool;
-    const cached = readSharedFamiliesCache(projectId, targetSchool);
+    const cached = readSharedFamiliesCache(projectId, selectedSchoolForSharedFamilies);
     if (cached) {
       setSharedFamilies(cached);
       setSharedFamiliesLoading(false);
@@ -733,11 +741,11 @@ export default function TeamDashboard({
 
     setSharedFamiliesLoading(true);
 
-    obtenerFamiliasCompartidasProyectoDB(projectId, targetSchool)
+    obtenerFamiliasCompartidasProyectoDB(projectId, selectedSchoolForSharedFamilies)
       .then((data) => {
         if (!mounted) return;
         setSharedFamilies(data);
-        writeSharedFamiliesCache(projectId, targetSchool, data);
+        writeSharedFamiliesCache(projectId, selectedSchoolForSharedFamilies, data);
       })
       .catch(() => {
         if (!mounted) return;
@@ -750,7 +758,7 @@ export default function TeamDashboard({
     return () => {
       mounted = false;
     };
-  }, [projectId, activeSchool]);
+  }, [projectId, selectedSchoolForSharedFamilies]);
 
   const handleAddCategory = () => {
     if (!canEditConfig) return;
@@ -880,7 +888,7 @@ export default function TeamDashboard({
   }, [projectId]);
 
   useEffect(() => {
-    if (!canEditConfig || !projectId || !themesHydrated) return;
+    if (!projectId || !themesHydrated || !canEditConfig) return;
     if (skipNextThemeSaveRef.current) {
       skipNextThemeSaveRef.current = false;
       return;
@@ -914,7 +922,7 @@ export default function TeamDashboard({
   }, [savedCommentIds]);
 
   useEffect(() => {
-    if (!canEditConfig || !projectId || !teamSettingsHydrated) return;
+    if (!projectId || !teamSettingsHydrated || !canEditConfig) return;
     if (skipNextTeamSettingsSaveRef.current) {
       skipNextTeamSettingsSaveRef.current = false;
       return;
@@ -936,6 +944,44 @@ export default function TeamDashboard({
 
     return () => window.clearTimeout(timeoutId);
   }, [positiveToneRules, constructiveToneRules, projectId, teamSettingsHydrated, canEditConfig]);
+
+  useEffect(() => {
+    if (!projectId || !selectedDetail?.id) {
+      setSelectedDetailLoading(false);
+      return;
+    }
+
+    const cacheKey = `${projectId}:${selectedDetail.id}`;
+    if (loadedFullCommentIdsRef.current.has(cacheKey)) {
+      setSelectedDetailLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    loadedFullCommentIdsRef.current.add(cacheKey);
+    setSelectedDetailLoading(true);
+
+    obtenerComentarioCompletoEncuestaDB(projectId, selectedDetail.id)
+      .then((full) => {
+        if (cancelled || !full) return;
+        setSelectedDetail((current) => {
+          if (!current || current.id !== selectedDetail.id) return current;
+          return {
+            ...current,
+            positive: full.positive || current.positive,
+            improvement: full.improvement || current.improvement,
+          };
+        });
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setSelectedDetailLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, selectedDetail?.id]);
 
   const toggleSaveComment = (id: string) => {
     setSavedCommentIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
@@ -1113,13 +1159,13 @@ export default function TeamDashboard({
               <div className="rounded-2xl border border-emerald-100 bg-emerald-50/60 p-4">
                 <p className="text-[10px] font-black uppercase tracking-widest text-emerald-600">Lo positivo</p>
                 <div className="mt-2 max-h-[50vh] overflow-y-auto pr-1">
-                  <p className="text-sm font-medium leading-relaxed text-slate-700">&ldquo;{selectedDetail.positive || "Sin respuesta"}&rdquo;</p>
+                  <p className="text-sm font-medium leading-relaxed text-slate-700">&ldquo;{selectedDetailLoading ? "Cargando comentario completo..." : selectedDetail.positive || "Sin respuesta"}&rdquo;</p>
                 </div>
               </div>
               <div className="rounded-2xl border border-blue-100 bg-blue-50/60 p-4">
                 <p className="text-[10px] font-black uppercase tracking-widest text-blue-600">Oportunidades de mejora</p>
                 <div className="mt-2 max-h-[50vh] overflow-y-auto pr-1">
-                  <p className="text-sm font-medium leading-relaxed text-slate-700">&ldquo;{selectedDetail.improvement || "Sin respuesta"}&rdquo;</p>
+                  <p className="text-sm font-medium leading-relaxed text-slate-700">&ldquo;{selectedDetailLoading ? "Cargando comentario completo..." : selectedDetail.improvement || "Sin respuesta"}&rdquo;</p>
                 </div>
               </div>
             </div>
@@ -1259,146 +1305,6 @@ export default function TeamDashboard({
               />
           </div>
 
-          {familyChildrenSummary && familyChildrenSummary.totalFamilias > 0 && (
-            <div className="mt-4 rounded-2xl border border-amber-100 bg-amber-50/70 p-4">
-              <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
-                <div>
-                  <p className="text-[10px] font-black uppercase tracking-widest text-amber-700">
-                    {activeSchool === "Todos los colegios" ? "Hijos por familia por colegio" : "Hijos por familia en tu colegio"}
-                  </p>
-                  <p className="mt-1 text-xs font-semibold text-amber-900">
-                    {activeSchool === "Todos los colegios"
-                      ? "Muestra el universo de familias agrupado por cantidad de hijos dentro de cada colegio del proyecto."
-                      : `Cuenta familias del universo cargado según cuántos hijos tienen dentro de ${activeSchool || "tu colegio"}.`}
-                  </p>
-                </div>
-                <p className="text-[11px] font-bold text-amber-700">
-                  Promedio: {familyChildrenSummary.promedioHijos} hijos por familia
-                </p>
-              </div>
-
-              <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
-                <div className="rounded-xl border border-amber-100 bg-white px-3 py-2">
-                  <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">1 hijo</p>
-                  <p className="mt-1 text-xl font-black text-slate-900">{familyChildrenSummary.unHijo}</p>
-                  <p className="text-[10px] font-semibold text-slate-500">familias</p>
-                </div>
-                <div className="rounded-xl border border-amber-100 bg-white px-3 py-2">
-                  <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">2 hijos</p>
-                  <p className="mt-1 text-xl font-black text-slate-900">{familyChildrenSummary.dosHijos}</p>
-                  <p className="text-[10px] font-semibold text-slate-500">familias</p>
-                </div>
-                <div className="rounded-xl border border-amber-100 bg-white px-3 py-2">
-                  <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">3 hijos</p>
-                  <p className="mt-1 text-xl font-black text-slate-900">{familyChildrenSummary.tresHijos}</p>
-                  <p className="text-[10px] font-semibold text-slate-500">familias</p>
-                </div>
-                <div className="rounded-xl border border-amber-100 bg-white px-3 py-2">
-                  <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">4 o más</p>
-                  <p className="mt-1 text-xl font-black text-slate-900">{familyChildrenSummary.cuatroOMas}</p>
-                  <p className="text-[10px] font-semibold text-slate-500">familias</p>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {(sharedFamiliesLoading || sharedFamilies) && (
-            <div className="mt-4 rounded-2xl border border-sky-100 bg-sky-50/80 p-4">
-              <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
-                <div>
-                  <p className="text-[10px] font-black uppercase tracking-widest text-sky-700">
-                    Dónde más tienen hijos estas familias
-                  </p>
-                  <p className="mt-1 text-xs font-semibold text-sky-900">
-                    Muestra cómo se distribuyen estas familias dentro del mismo polo: si están solo en este colegio o si comparten hijos con los otros colegios del polo.
-                  </p>
-                </div>
-                {sharedFamilies?.year && (
-                  <p className="text-[11px] font-bold text-sky-700">Año {sharedFamilies.year}</p>
-                )}
-              </div>
-
-              {sharedFamiliesLoading && !sharedFamilies?.resumen && !sharedFamilies?.porColegio ? (
-                <p className="mt-3 rounded-xl border border-sky-100 bg-white px-3 py-2 text-xs font-black text-sky-700">
-                  Calculando composición entre colegios...
-                </p>
-              ) : activeSchool !== "Todos los colegios" && !sharedFamilies?.resumen ? (
-                <p className="mt-3 rounded-xl border border-amber-100 bg-white px-3 py-2 text-xs font-black text-amber-700">
-                  {sharedFamilies?.mensaje || "No se encontró composición familiar para este colegio/año. Revisá que estén cargadas y confirmadas las bases de varones, mujeres y jardines del mismo año."}
-                </p>
-              ) : activeSchool !== "Todos los colegios" && sharedFamilies?.resumen ? (
-                <>
-                  {Array.isArray(sharedFamilies.combinaciones) && sharedFamilies.combinaciones.length > 0 ? (
-                    <div className="mt-4 overflow-x-auto rounded-2xl border border-sky-100 bg-white">
-                      <div className="bg-sky-50 px-3 py-2">
-                        <p className="text-[10px] font-black uppercase tracking-widest text-sky-700">Detalle de recorridos familiares</p>
-                      </div>
-                      <table className="min-w-full text-xs">
-                        <thead className="bg-white text-slate-500">
-                          <tr>
-                            <th className="px-3 py-2 text-left font-black uppercase tracking-widest">Recorrido familiar</th>
-                            <th className="px-3 py-2 text-right font-black uppercase tracking-widest">Familias</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {sharedFamilies.combinaciones.map((item: any) => (
-                            <tr key={item.label} className="border-t border-sky-50 text-slate-700">
-                              <td className="px-3 py-2 font-bold">{item.label}</td>
-                              <td className="px-3 py-2 text-right font-black text-sky-800">{item.familias}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  ) : (
-                    <p className="mt-3 rounded-xl border border-amber-100 bg-white px-3 py-2 text-xs font-black text-amber-700">
-                      No hay recorridos familiares para mostrar en esta selección.
-                    </p>
-                  )}
-                </>
-              ) : Array.isArray(sharedFamilies?.porColegio) && sharedFamilies.porColegio.length > 0 ? (
-                <div className="mt-4 rounded-2xl border border-sky-100 bg-white p-4">
-                  <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
-                    <div>
-                      <p className="text-xs font-black text-slate-900">Resumen general por colegio</p>
-                      <p className="mt-1 text-[11px] font-semibold leading-relaxed text-slate-500">
-                        Seleccioná un colegio arriba para ver el detalle completo. Acá se muestra una vista compacta para administración.
-                      </p>
-                    </div>
-                    <p className="text-[10px] font-black uppercase tracking-widest text-sky-700">
-                      {sharedFamilies.porColegio.length} colegios con datos
-                    </p>
-                  </div>
-
-                  <div className="mt-4 max-h-72 overflow-y-auto rounded-2xl border border-sky-100 bg-white">
-                    <table className="min-w-full text-xs">
-                      <thead className="sticky top-0 bg-sky-50 text-sky-700">
-                        <tr>
-                          <th className="px-3 py-2 text-left font-black uppercase tracking-widest">Colegio</th>
-                          <th className="px-3 py-2 text-right font-black uppercase tracking-widest">Solo ahí</th>
-                          <th className="px-3 py-2 text-right font-black uppercase tracking-widest">Compartidas</th>
-                          <th className="px-3 py-2 text-right font-black uppercase tracking-widest">En los 3</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {[...sharedFamilies.porColegio]
-                          .sort((a: any, b: any) => getSharedFamiliesSharedTotal(b) - getSharedFamiliesSharedTotal(a))
-                          .map((row: any) => (
-                            <tr key={row.colegio} className="border-t border-sky-50 text-slate-700">
-                              <td className="px-3 py-2 font-black">{row.colegio}</td>
-                              <td className="px-3 py-2 text-right">{Number(row?.soloEsteColegio || 0)}</td>
-                              <td className="px-3 py-2 text-right font-black text-sky-800">{getSharedFamiliesSharedTotal(row)}</td>
-                              <td className="px-3 py-2 text-right">{Number(row?.esteMasDosOMasColegios || 0)}</td>
-                            </tr>
-                          ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              ) : null}
-            </div>
-          )}
-
           {showFamilyExtendedBreakdown && (
           <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
             <div className="rounded-2xl border border-slate-100 bg-slate-50 p-3 md:col-span-2">
@@ -1462,6 +1368,93 @@ export default function TeamDashboard({
         </div>
       )}
 
+      {activeSchool !== "Todos los colegios" && (sharedFamiliesLoading || sharedFamilies) && (
+        <div className="mb-6 rounded-[28px] border border-white bg-white/80 p-5 shadow-xl backdrop-blur-xl">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h3 className="font-display text-xl font-black text-slate-900">Dónde más tienen hijos estas familias</h3>
+              <p className="mt-1 max-w-3xl text-xs font-semibold leading-relaxed text-slate-500">
+                Muestra si las familias de {shortSchoolName(activeSchool)} tienen hijos solo en este colegio o también en otros colegios del mismo año.
+              </p>
+              {sharedFamilies?.year && (
+                <p className="mt-1 text-[11px] font-bold text-sky-700">Año {sharedFamilies.year}</p>
+              )}
+            </div>
+            <HelpTip
+              title="Familias compartidas"
+              body="Se calcula desde el padrón familiar confirmado. Solo aparece cuando seleccionás un colegio para evitar cargar cruces pesados en la vista general."
+            />
+          </div>
+
+          {sharedFamiliesLoading && !sharedFamilies?.resumen ? (
+            <div className="mt-4 rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-4 text-xs font-semibold text-slate-500">
+              Cargando composición familiar del colegio seleccionado…
+            </div>
+          ) : !sharedFamilies?.resumen ? (
+            <div className="mt-4 rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-4 text-xs font-semibold text-slate-500">
+              {sharedFamilies?.mensaje || "No se encontró composición familiar para este colegio/año. Revisá que el padrón esté cargado y confirmado."}
+            </div>
+          ) : (
+            <div className="mt-5 space-y-4">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                <KpiCard
+                  title="Familias del colegio"
+                  value={sharedFamiliesTotal}
+                  subtitle="Universo detectado"
+                  icon={<Users size={18} weight="fill" className="text-sky-500" />}
+                  accent="text-slate-900"
+                />
+                <KpiCard
+                  title="Solo en este colegio"
+                  value={Number(sharedFamilies.resumen?.soloEsteColegio || 0)}
+                  subtitle="No comparten con otros colegios"
+                  accent="text-emerald-600"
+                />
+                <KpiCard
+                  title="Compartidas"
+                  value={sharedFamiliesSharedTotal}
+                  subtitle="Tienen hijos en otros colegios"
+                  accent="text-blue-600"
+                />
+              </div>
+
+              {(sharedFamilyRelationCards.length > 0 || sharedFamilyOtherSchoolCards.length > 0) && (
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+                  {[...sharedFamilyRelationCards, ...sharedFamilyOtherSchoolCards].map((item) => (
+                    <div key={item.label} className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">{item.label}</p>
+                      <p className="mt-2 font-display text-3xl font-black text-slate-900">{item.value}</p>
+                      <p className="mt-1 text-[10px] font-semibold text-slate-500">familias</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {Array.isArray(sharedFamilies.combinaciones) && sharedFamilies.combinaciones.length > 0 && (
+                <div className="overflow-x-auto rounded-2xl border border-slate-100 bg-white">
+                  <table className="min-w-full text-xs">
+                    <thead className="bg-slate-50 text-slate-600">
+                      <tr>
+                        <th className="px-3 py-2 text-left">Combinación de colegios</th>
+                        <th className="px-3 py-2 text-right">Familias</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sharedFamilies.combinaciones.map((item: any) => (
+                        <tr key={String(item?.label || "-")} className="border-t border-slate-100 text-slate-700">
+                          <td className="px-3 py-2 font-black">{item?.label || "Sin combinación"}</td>
+                          <td className="px-3 py-2 text-right font-black text-blue-700">{Number(item?.familias || 0)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="mb-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
         <div className="rounded-[24px] border border-white bg-white/80 p-5 shadow-xl backdrop-blur-xl">
           <div className="flex items-start justify-between gap-2">
@@ -1490,7 +1483,7 @@ export default function TeamDashboard({
                 </button>
               ))
             )}
-            <p className="pt-1 text-[10px] font-bold uppercase tracking-widest text-slate-400">El radar es informativo. La edición de temas se gestiona abajo en “Categorías de análisis”.</p>
+            <p className="pt-1 text-[10px] font-bold uppercase tracking-widest text-slate-400">{canEditConfig ? "El radar es informativo. La edición de temas se gestiona abajo en “Categorías de análisis”." : "El radar es informativo y usa los criterios definidos por administración."}</p>
             <div className="pt-2">
               <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Temas editables</p>
               <div className="flex flex-wrap gap-1">
@@ -1499,7 +1492,7 @@ export default function TeamDashboard({
                     {cat.name}
                   </span>
                 ))}
-                {customCategories.length === 0 && <span className="text-[10px] font-semibold text-slate-400">Crealos abajo en “Categorías de análisis”.</span>}
+                {customCategories.length === 0 && <span className="text-[10px] font-semibold text-slate-400">{canEditConfig ? "Crealos abajo en “Categorías de análisis”." : "Todavía no hay temas configurados."}</span>}
               </div>
             </div>
             <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
@@ -1561,7 +1554,7 @@ export default function TeamDashboard({
             ))}
           </div>
 
-          {canEditConfig && editingToneRules && (
+          {editingToneRules && canEditConfig && (
             <div className="mb-3 rounded-xl border border-blue-100 bg-blue-50/60 p-3">
               <p className="text-[10px] font-black uppercase tracking-widest text-blue-700">Cómo usar: separá palabras por coma</p>
               <div className="mt-2 grid gap-2 md:grid-cols-2">
@@ -1629,7 +1622,7 @@ export default function TeamDashboard({
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2">
               <div>
                 <h4 className="text-sm font-black text-slate-900">Categorías de Análisis</h4>
-                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mt-0.5">Creá y editá criterios por palabras clave para controlar el radar del proyecto</p>
+                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mt-0.5">{canEditConfig ? "Creá y editá criterios por palabras clave para controlar el radar del proyecto" : "Criterios de lectura definidos por administración"}</p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <button
@@ -1654,19 +1647,19 @@ export default function TeamDashboard({
                 {syncMessage}
               </p>
             )}
-{canEditConfig && (
-            <div className="mb-3 rounded-xl border border-blue-100 bg-white p-3">
-              <p className="text-[10px] font-black uppercase tracking-widest text-blue-600">Cómo editar temas (rápido)</p>
-              <ul className="mt-1 space-y-1 text-xs font-semibold text-slate-600">
-                <li>1) Elegí un tema y tocá el ícono de lápiz.</li>
-                <li>2) Cambiá nombre y palabras clave separadas por coma.</li>
-                <li>3) Guardá y el radar se recalcula automáticamente.</li>
-                <li>4) Los cambios quedan guardados para todas las cuentas que abran este mismo proyecto.</li>
-              </ul>
-            </div>
+            {canEditConfig && (
+              <div className="mb-3 rounded-xl border border-blue-100 bg-white p-3">
+                <p className="text-[10px] font-black uppercase tracking-widest text-blue-600">Cómo editar temas (rápido)</p>
+                <ul className="mt-1 space-y-1 text-xs font-semibold text-slate-600">
+                  <li>1) Elegí un tema y tocá el ícono de lápiz.</li>
+                  <li>2) Cambiá nombre y palabras clave separadas por coma.</li>
+                  <li>3) Guardá y el radar se recalcula automáticamente.</li>
+                  <li>4) Los cambios quedan guardados para todas las cuentas que abran este mismo proyecto.</li>
+                </ul>
+              </div>
             )}
 
-            {canEditConfig && isCreatingCat && (
+            {isCreatingCat && canEditConfig && (
               <div className="mb-4 mt-3 flex flex-col sm:flex-row gap-2 rounded-xl bg-white p-3 border border-blue-100 shadow-sm">
                 <input 
                   type="text" 
@@ -1697,7 +1690,7 @@ export default function TeamDashboard({
                 <span className="text-xs font-semibold text-slate-400">Cargando categorías del proyecto...</span>
               )}
               {themesHydrated && customCategories.length === 0 && !isCreatingCat && (
-                 <span className="text-xs font-semibold text-slate-400">Aún no hay categorías. Agregá una para empezar a filtrar.</span>
+                 <span className="text-xs font-semibold text-slate-400">{canEditConfig ? "Aún no hay categorías. Agregá una para empezar a filtrar." : "Aún no hay categorías guardadas para este proyecto."}</span>
               )}
               {themesHydrated && customCategories.map(cat => (
                  <div 
@@ -1730,7 +1723,7 @@ export default function TeamDashboard({
                  </div>
               ))}
             </div>
-            {canEditConfig && editingCatName && (
+            {editingCatName && canEditConfig && (
               <div className="mt-3 flex flex-col gap-2 rounded-xl border border-blue-100 bg-white p-3 sm:flex-row">
                 <input
                   value={editingCatNewName}

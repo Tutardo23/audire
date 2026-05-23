@@ -7,6 +7,10 @@ import { SHEETS_BY_GROUP, type FamilyGroup } from "./lib/familyImportConfig";
 
 const sql = neon(process.env.DATABASE_URL!);
 
+// Límite de preview para comentarios en carga inicial.
+// Los textos completos se piden solo cuando el usuario abre un detalle/modal.
+const COMMENT_PREVIEW_LIMIT = 900;
+
 // --------------------
 // HELPERS
 // --------------------
@@ -494,7 +498,7 @@ export async function obtenerEncuestasDB(projectId: string) {
   const scopedRole = scope.role === "director" || scope.role === "equipo";
   const schoolPattern = sqlLikeNormalizedPattern(scope.colegio);
   const poloPattern = sqlLikeNormalizedPattern(scope.polo);
-  const cacheKey = scopeCacheKey("surveys:full:v3", userId, scope, [projectId]);
+  const cacheKey = scopeCacheKey("surveys:preview:v4", userId, scope, [projectId]);
   const cached = getServerCache<any[]>(cacheKey);
   if (cached) return cached;
 
@@ -506,7 +510,7 @@ export async function obtenerEncuestasDB(projectId: string) {
   // comentarios de todo el proyecto y descartarlos recién en JavaScript.
   if (scopedRole && schoolPattern && poloPattern) {
     rows = await baseSelect`
-      SELECT id, colegio, curso, polo, sexo, nombre, apellido, score, positive, improvement, NULL::text AS created_at, NULL::text AS date
+      SELECT id, colegio, curso, polo, sexo, nombre, apellido, score, left(coalesce(positive, ''), ${COMMENT_PREVIEW_LIMIT}) AS positive, left(coalesce(improvement, ''), ${COMMENT_PREVIEW_LIMIT}) AS improvement, NULL::text AS created_at, NULL::text AS date
       FROM encuestas
       WHERE project_id = ${projectId}::uuid
         AND (
@@ -521,7 +525,7 @@ export async function obtenerEncuestasDB(projectId: string) {
     `;
   } else if (scopedRole && schoolPattern) {
     rows = await baseSelect`
-      SELECT id, colegio, curso, polo, sexo, nombre, apellido, score, positive, improvement, NULL::text AS created_at, NULL::text AS date
+      SELECT id, colegio, curso, polo, sexo, nombre, apellido, score, left(coalesce(positive, ''), ${COMMENT_PREVIEW_LIMIT}) AS positive, left(coalesce(improvement, ''), ${COMMENT_PREVIEW_LIMIT}) AS improvement, NULL::text AS created_at, NULL::text AS date
       FROM encuestas
       WHERE project_id = ${projectId}::uuid
         AND (
@@ -532,7 +536,7 @@ export async function obtenerEncuestasDB(projectId: string) {
     `;
   } else if (scopedRole && poloPattern) {
     rows = await baseSelect`
-      SELECT id, colegio, curso, polo, sexo, nombre, apellido, score, positive, improvement, NULL::text AS created_at, NULL::text AS date
+      SELECT id, colegio, curso, polo, sexo, nombre, apellido, score, left(coalesce(positive, ''), ${COMMENT_PREVIEW_LIMIT}) AS positive, left(coalesce(improvement, ''), ${COMMENT_PREVIEW_LIMIT}) AS improvement, NULL::text AS created_at, NULL::text AS date
       FROM encuestas
       WHERE project_id = ${projectId}::uuid
         AND (
@@ -543,7 +547,7 @@ export async function obtenerEncuestasDB(projectId: string) {
     `;
   } else {
     rows = await baseSelect`
-      SELECT id, colegio, curso, polo, sexo, nombre, apellido, score, positive, improvement, NULL::text AS created_at, NULL::text AS date
+      SELECT id, colegio, curso, polo, sexo, nombre, apellido, score, left(coalesce(positive, ''), ${COMMENT_PREVIEW_LIMIT}) AS positive, left(coalesce(improvement, ''), ${COMMENT_PREVIEW_LIMIT}) AS improvement, NULL::text AS created_at, NULL::text AS date
       FROM encuestas
       WHERE project_id = ${projectId}::uuid
       ORDER BY id DESC
@@ -556,6 +560,52 @@ export async function obtenerEncuestasDB(projectId: string) {
     : (rows as any[]).filter((r) => matchesScopedText(r?.colegio, scope.colegio) && matchesScopedText(r?.polo, scope.polo));
 
   setServerCache(cacheKey, result, scopedRole ? 120_000 : 60_000);
+  return result;
+}
+
+
+export async function obtenerComentarioCompletoEncuestaDB(projectId: string, encuestaId: string) {
+  const userId = await requireUserId();
+  if (!projectId || !encuestaId) return null;
+
+  UUIDSchema.parse(projectId);
+  const scope = await getAccessScope();
+  await assertProjectAccess(projectId, userId, scope);
+
+  const cacheKey = scopeCacheKey("survey-comment-full:v1", userId, scope, [projectId, String(encuestaId)]);
+  const cached = getServerCache<{ id: string; positive: string; improvement: string } | null>(cacheKey);
+  if (cached) return cached;
+
+  const rows = await sql`
+    SELECT
+      id,
+      colegio,
+      polo,
+      positive,
+      improvement
+    FROM encuestas
+    WHERE project_id = ${projectId}::uuid
+      AND id::text = ${String(encuestaId)}
+    LIMIT 1
+  `;
+
+  const row = (rows as any[])?.[0];
+  if (!row) return null;
+
+  const scopedRole = scope.role === "director" || scope.role === "equipo";
+  if (scopedRole) {
+    const bySchool = matchesScopedText(row?.colegio, scope.colegio);
+    const byPolo = matchesScopedText(row?.polo, scope.polo);
+    if (!bySchool || !byPolo) return null;
+  }
+
+  const result = {
+    id: String(row.id),
+    positive: String(row.positive || ""),
+    improvement: String(row.improvement || ""),
+  };
+
+  setServerCache(cacheKey, result, 300_000);
   return result;
 }
 

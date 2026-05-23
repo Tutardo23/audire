@@ -38,6 +38,7 @@ import {
 import {
   obtenerEncuestasComparacionLigeraDB,
   obtenerRespuestaHistoricaFamiliaDB,
+  obtenerComentarioCompletoEncuestaDB,
   listarProyectosDB,
   listarProyectosComparacionNpsDB,
   obtenerTemasProyectoDB,
@@ -835,6 +836,8 @@ export default function DirectorDashboard({
   const [familyPage, setFamilyPage] = useState(1);
   const [selectedFamilyModal, setSelectedFamilyModal] = useState<any | null>(null);
   const [historicalCommentLoading, setHistoricalCommentLoading] = useState(false);
+  const [currentCommentLoading, setCurrentCommentLoading] = useState(false);
+  const loadedCurrentCommentIdsRef = useRef<Set<string>>(new Set());
   const FAMILIES_PER_PAGE = 8;
 
   const currentYear = useMemo(() => getMostFrequentYear(stats.schoolData), [stats.schoolData]);
@@ -1028,6 +1031,7 @@ export default function DirectorDashboard({
         const trend = currentFam.score > r.score ? "up" : currentFam.score < r.score ? "down" : "flat";
         intersection.push({
           nombre: `${currentFam.nombre} ${currentFam.apellido}`.trim(),
+          currentId: currentFam.id,
           currentScore: currentFam.score,
           compareScore: r.score,
           currentPositive: currentFam.positive,
@@ -1483,6 +1487,30 @@ export default function DirectorDashboard({
   const openFamilyComparisonModal = (family: any) => {
     setSelectedFamilyModal(family);
 
+    const currentProjectId = projectId || stats.schoolData?.[0]?.projectId;
+    const currentCommentCacheKey = currentProjectId && family?.currentId ? `${currentProjectId}:${family.currentId}` : "";
+
+    if (currentProjectId && family?.currentId && !loadedCurrentCommentIdsRef.current.has(currentCommentCacheKey)) {
+      loadedCurrentCommentIdsRef.current.add(currentCommentCacheKey);
+      setCurrentCommentLoading(true);
+      obtenerComentarioCompletoEncuestaDB(currentProjectId, family.currentId)
+        .then((full) => {
+          if (!full) return;
+          setSelectedFamilyModal((current: any) => {
+            if (!current || current.nombre !== family.nombre) return current;
+            return {
+              ...current,
+              currentPositive: full.positive || current.currentPositive || "",
+              currentImprovement: full.improvement || current.currentImprovement || "",
+            };
+          });
+        })
+        .catch(() => undefined)
+        .finally(() => setCurrentCommentLoading(false));
+    } else {
+      setCurrentCommentLoading(false);
+    }
+
     const alreadyHasHistoricalText =
       String(family?.comparePositive || "").trim().length > 3 ||
       String(family?.compareImprovement || "").trim().length > 3;
@@ -1569,11 +1597,11 @@ export default function DirectorDashboard({
                    <div className="space-y-5 h-[300px] overflow-y-auto pr-2 custom-scrollbar">
                      <div>
                        <p className="text-[10px] font-black uppercase text-emerald-600 mb-1.5 flex items-center gap-1.5"><ThumbsUp size={14} weight="fill"/> Lo que valora ahora</p>
-                       <p className="text-sm font-medium text-slate-900 leading-relaxed bg-white p-3 rounded-xl border border-emerald-100 shadow-sm">&ldquo;{selectedFamilyModal.currentPositive || "Sin comentario cargado en este campo"}&rdquo;</p>
+                       <p className="text-sm font-medium text-slate-900 leading-relaxed bg-white p-3 rounded-xl border border-emerald-100 shadow-sm">&ldquo;{currentCommentLoading ? "Cargando comentario completo..." : selectedFamilyModal.currentPositive || "Sin comentario cargado en este campo"}&rdquo;</p>
                      </div>
                      <div>
                        <p className="text-[10px] font-black uppercase text-amber-600 mb-1.5 flex items-center gap-1.5"><Wrench size={14} weight="fill"/> Oportunidades de mejora actuales</p>
-                       <p className="text-sm font-medium text-slate-900 leading-relaxed bg-white p-3 rounded-xl border border-amber-100 shadow-sm">&ldquo;{selectedFamilyModal.currentImprovement || "Sin comentario cargado en este campo"}&rdquo;</p>
+                       <p className="text-sm font-medium text-slate-900 leading-relaxed bg-white p-3 rounded-xl border border-amber-100 shadow-sm">&ldquo;{currentCommentLoading ? "Cargando comentario completo..." : selectedFamilyModal.currentImprovement || "Sin comentario cargado en este campo"}&rdquo;</p>
                      </div>
                    </div>
                 </div>
