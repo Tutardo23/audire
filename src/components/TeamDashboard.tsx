@@ -26,7 +26,8 @@ import {
   obtenerConfiguracionEquipoProyectoDB,
   guardarConfiguracionEquipoProyectoDB,
   obtenerFamiliasCompartidasProyectoDB,
-  obtenerComentarioCompletoEncuestaDB,
+  listarProyectosDB,
+  copiarTemasDesdeProyectoDB,
 } from "../app/actions";
 
 // ─────────────────────────────────────────────
@@ -170,89 +171,6 @@ const schoolGroupForDashboard = (value?: string | null): "varones" | "mujeres" |
   return "otro";
 };
 
-const getSharedFamilyRelationCards = (school: string, resumen: any) => {
-  const group = schoolGroupForDashboard(school);
-
-  if (group === "varones") {
-    return [
-      { label: "También con jardín", value: Number(resumen?.conJardin || 0) },
-      { label: "También con mujeres", value: Number(resumen?.conMujeres || 0) },
-    ];
-  }
-
-  if (group === "mujeres") {
-    return [
-      { label: "También con jardín", value: Number(resumen?.conJardin || 0) },
-      { label: "También con varones", value: Number(resumen?.conVarones || 0) },
-    ];
-  }
-
-  if (group === "jardines") {
-    return [
-      { label: "También con mujeres", value: Number(resumen?.conMujeres || 0) },
-      { label: "También con varones", value: Number(resumen?.conVarones || 0) },
-    ];
-  }
-
-  return [
-    { label: "También con jardín", value: Number(resumen?.conJardin || 0) },
-    { label: "También con mujeres", value: Number(resumen?.conMujeres || 0) },
-    { label: "También con varones", value: Number(resumen?.conVarones || 0) },
-  ];
-};
-
-const shortSchoolName = (value?: string | null) => {
-  const raw = String(value ?? "").trim();
-  if (!raw) return "este colegio";
-
-  return raw
-    .replace(/^Colegio\s+/i, "")
-    .replace(/^Jardín\s+/i, "Jardín ")
-    .replace(/\s+/g, " ")
-    .trim();
-};
-
-const getSharedFamiliesTotal = (resumen: any) =>
-  Number(resumen?.soloEsteColegio || 0) +
-  Number(resumen?.esteMasUnColegio || 0) +
-  Number(resumen?.esteMasDosOMasColegios || 0);
-
-const getSharedFamiliesSharedTotal = (resumen: any) =>
-  Number(resumen?.esteMasUnColegio || 0) + Number(resumen?.esteMasDosOMasColegios || 0);
-
-const getOtherSchoolCardsFromCombinations = (currentSchool: string, combinaciones: any[] = []) => {
-  const currentKey = normalizeSchoolForCompare(currentSchool);
-  const totals = new Map<string, { label: string; value: number }>();
-
-  if (!currentKey || !Array.isArray(combinaciones)) return [];
-
-  combinaciones.forEach((item) => {
-    const familias = Number(item?.familias || 0);
-    const parts = String(item?.label || "")
-      .split("+")
-      .map((part) => part.trim())
-      .filter(Boolean);
-
-    if (!familias || parts.length < 2) return;
-    if (!parts.some((part) => normalizeSchoolForCompare(part) === currentKey)) return;
-
-    parts.forEach((part) => {
-      const key = normalizeSchoolForCompare(part);
-      if (!key || key === currentKey) return;
-      const current = totals.get(key) || { label: part, value: 0 };
-      current.value += familias;
-      totals.set(key, current);
-    });
-  });
-
-  return Array.from(totals.values())
-    .sort((a, b) => b.value - a.value)
-    .map((item) => ({
-      label: `Familias compartidas con ${shortSchoolName(item.label)}`,
-      value: item.value,
-    }));
-};
-
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const highlightText = (text: string, query: string, extraKeywords: string[] = []) => {
@@ -284,6 +202,58 @@ const highlightText = (text: string, query: string, extraKeywords: string[] = []
 
 const percentage = (part: number, total: number) => (total ? Math.round((part / total) * 100) : 0);
 const hasMeaningfulComment = (value?: string | null) => String(value ?? "").trim().length > 3;
+
+const clientActionMemoryCache = new Map<string, any>();
+const clientActionInflightCache = new Map<string, Promise<any>>();
+
+const readClientActionSessionCache = (key: string) => {
+  if (typeof window === "undefined" || !key) return null;
+  try {
+    const raw = window.sessionStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+};
+
+const writeClientActionSessionCache = (key: string, data: any) => {
+  if (typeof window === "undefined" || !key || data === undefined) return;
+  try {
+    window.sessionStorage.setItem(key, JSON.stringify(data));
+  } catch {
+    // Cache opcional: si se llena storage, no rompemos la pantalla.
+  }
+};
+
+const cachedClientAction = <T,>(key: string, loader: () => Promise<T>) => {
+  if (!key) return loader();
+
+  if (clientActionMemoryCache.has(key)) {
+    return Promise.resolve(clientActionMemoryCache.get(key) as T);
+  }
+
+  const sessionCached = readClientActionSessionCache(key);
+  if (sessionCached !== null) {
+    clientActionMemoryCache.set(key, sessionCached);
+    return Promise.resolve(sessionCached as T);
+  }
+
+  const existing = clientActionInflightCache.get(key);
+  if (existing) return existing as Promise<T>;
+
+  const request = loader()
+    .then((data) => {
+      clientActionMemoryCache.set(key, data);
+      writeClientActionSessionCache(key, data);
+      return data;
+    })
+    .finally(() => {
+      clientActionInflightCache.delete(key);
+    });
+
+  clientActionInflightCache.set(key, request);
+  return request;
+};
 
 // ─────────────────────────────────────────────
 // UI COMPONENTES AUXILIARES
@@ -567,8 +537,6 @@ export default function TeamDashboard({
   const [savedFilter, setSavedFilter] = useState<"all" | "saved">("all");
   const [sessionSeed] = useState<number>(() => Date.now());
   const [selectedDetail, setSelectedDetail] = useState<SurveyRow | null>(null);
-  const [selectedDetailLoading, setSelectedDetailLoading] = useState(false);
-  const loadedFullCommentIdsRef = useRef<Set<string>>(new Set());
   const [selectedRadarTopic, setSelectedRadarTopic] = useState<string | null>(null);
   const [toneSeed, setToneSeed] = useState<number>(() => Date.now());
   const [commentFocusFilter, setCommentFocusFilter] = useState<FilterType>("Todos");
@@ -591,6 +559,11 @@ export default function TeamDashboard({
   const [teamSettingsHydrated, setTeamSettingsHydrated] = useState(false);
   const [syncingProjectConfig, setSyncingProjectConfig] = useState(false);
   const [syncMessage, setSyncMessage] = useState("");
+  const [copyThemesOpen, setCopyThemesOpen] = useState(false);
+  const [copySourceProjectId, setCopySourceProjectId] = useState("");
+  const [copyThemesLoading, setCopyThemesLoading] = useState(false);
+  const [copyThemesMessage, setCopyThemesMessage] = useState("");
+  const [copySourceProjects, setCopySourceProjects] = useState<any[]>([]);
   const skipNextThemeSaveRef = useRef(false);
   const skipNextTeamSettingsSaveRef = useRef(false);
   const lastSavedCategoriesKeyRef = useRef<string>(categoriesKey(DEFAULT_RADAR_CATEGORIES));
@@ -658,24 +631,6 @@ export default function TeamDashboard({
 
   const selectedSchoolForSharedFamilies = activeSchool !== "Todos los colegios" ? activeSchool : "";
 
-  const sharedFamiliesDisplaySchool = useMemo(() => {
-    if (!sharedFamilies?.resumen || !selectedSchoolForSharedFamilies) return selectedSchoolForSharedFamilies;
-    return String(sharedFamilies.resumen.colegio || selectedSchoolForSharedFamilies || "este colegio");
-  }, [sharedFamilies, selectedSchoolForSharedFamilies]);
-
-  const sharedFamilyRelationCards = useMemo(() => {
-    if (!sharedFamilies?.resumen || !selectedSchoolForSharedFamilies) return [];
-    return getSharedFamilyRelationCards(selectedSchoolForSharedFamilies, sharedFamilies.resumen);
-  }, [sharedFamilies, selectedSchoolForSharedFamilies]);
-
-  const sharedFamiliesTotal = useMemo(() => getSharedFamiliesTotal(sharedFamilies?.resumen), [sharedFamilies]);
-  const sharedFamiliesSharedTotal = useMemo(() => getSharedFamiliesSharedTotal(sharedFamilies?.resumen), [sharedFamilies]);
-
-  const sharedFamilyOtherSchoolCards = useMemo(() => {
-    if (!sharedFamilies?.resumen || !sharedFamiliesDisplaySchool) return [];
-    return getOtherSchoolCardsFromCombinations(sharedFamiliesDisplaySchool, sharedFamilies.combinaciones).slice(0, 4);
-  }, [sharedFamilies, sharedFamiliesDisplaySchool]);
-
   useEffect(() => {
     let mounted = true;
 
@@ -698,7 +653,7 @@ export default function TeamDashboard({
 
     setFamilyParticipationLoading(true);
 
-    obtenerParticipacionFamiliarProyectoDB(projectId)
+    cachedClientAction(`apdes:action:family-participation:${projectId}`, () => obtenerParticipacionFamiliarProyectoDB(projectId))
       .then((data) => {
         if (!mounted) return;
         setFamilyParticipation(data);
@@ -741,7 +696,10 @@ export default function TeamDashboard({
 
     setSharedFamiliesLoading(true);
 
-    obtenerFamiliasCompartidasProyectoDB(projectId, selectedSchoolForSharedFamilies)
+    cachedClientAction(
+      `apdes:action:shared-families:${projectId}:${normalize(selectedSchoolForSharedFamilies)}`,
+      () => obtenerFamiliasCompartidasProyectoDB(projectId, selectedSchoolForSharedFamilies),
+    )
       .then((data) => {
         if (!mounted) return;
         setSharedFamilies(data);
@@ -759,6 +717,51 @@ export default function TeamDashboard({
       mounted = false;
     };
   }, [projectId, selectedSchoolForSharedFamilies]);
+
+  const openCopyThemesPanel = () => {
+    if (!canEditConfig) return;
+    setCopyThemesOpen((prev) => !prev);
+    setCopyThemesMessage("");
+
+    if (copySourceProjects.length === 0) {
+      listarProyectosDB()
+        .then((projects: any) => {
+          const rows = Array.isArray(projects) ? projects : projects?.rows || [];
+          setCopySourceProjects(rows);
+        })
+        .catch(() => setCopyThemesMessage("No se pudieron cargar los proyectos origen."));
+    }
+  };
+
+  const copyThemesFromProject = () => {
+    if (!canEditConfig || !projectId || !copySourceProjectId) return;
+
+    const sourceProject = copySourceProjects.find((p: any) => String(p?.id) === String(copySourceProjectId));
+    const sourceName = String(sourceProject?.nombre || "el proyecto seleccionado");
+    const confirmed = window.confirm(
+      `Vas a reemplazar las categorías de este proyecto con las de “${sourceName}”.\n\nAntes de copiar, se guarda un respaldo en el historial para poder volver atrás. ¿Confirmás?`
+    );
+    if (!confirmed) return;
+
+    setCopyThemesLoading(true);
+    setCopyThemesMessage("Copiando categorías...");
+
+    copiarTemasDesdeProyectoDB(projectId, copySourceProjectId)
+      .then((result: any) => {
+        const mapped = mapThemesToCategories(result?.themes);
+        const nextKey = categoriesKey(mapped);
+        lastSavedCategoriesKeyRef.current = nextKey;
+        skipNextThemeSaveRef.current = true;
+        setCustomCategories(mapped);
+        setActiveCategory(null);
+        setSyncMessage(`Categorías copiadas desde “${String(result?.sourceProjectName || sourceName)}”. Se guardó respaldo en el historial.`);
+        setCopyThemesMessage("");
+        setCopyThemesOpen(false);
+        setCopySourceProjectId("");
+      })
+      .catch((err: any) => setCopyThemesMessage(err?.message || "No se pudieron copiar las categorías."))
+      .finally(() => setCopyThemesLoading(false));
+  };
 
   const handleAddCategory = () => {
     if (!canEditConfig) return;
@@ -823,10 +826,18 @@ export default function TeamDashboard({
     }
 
     try {
-      const [themes, teamSettings] = await Promise.all([
-        obtenerTemasProyectoDB(projectId),
-        obtenerConfiguracionEquipoProyectoDB(projectId),
-      ]);
+      const [themes, teamSettings] = showMessage
+        ? await Promise.all([
+            obtenerTemasProyectoDB(projectId),
+            obtenerConfiguracionEquipoProyectoDB(projectId),
+          ])
+        : await cachedClientAction(
+            `apdes:action:team-config:${projectId}`,
+            () => Promise.all([
+              obtenerTemasProyectoDB(projectId),
+              obtenerConfiguracionEquipoProyectoDB(projectId),
+            ]),
+          );
 
       const mapped = mapThemesToCategories(themes);
       if (mapped.length > 0) {
@@ -944,44 +955,6 @@ export default function TeamDashboard({
 
     return () => window.clearTimeout(timeoutId);
   }, [positiveToneRules, constructiveToneRules, projectId, teamSettingsHydrated, canEditConfig]);
-
-  useEffect(() => {
-    if (!projectId || !selectedDetail?.id) {
-      setSelectedDetailLoading(false);
-      return;
-    }
-
-    const cacheKey = `${projectId}:${selectedDetail.id}`;
-    if (loadedFullCommentIdsRef.current.has(cacheKey)) {
-      setSelectedDetailLoading(false);
-      return;
-    }
-
-    let cancelled = false;
-    loadedFullCommentIdsRef.current.add(cacheKey);
-    setSelectedDetailLoading(true);
-
-    obtenerComentarioCompletoEncuestaDB(projectId, selectedDetail.id)
-      .then((full) => {
-        if (cancelled || !full) return;
-        setSelectedDetail((current) => {
-          if (!current || current.id !== selectedDetail.id) return current;
-          return {
-            ...current,
-            positive: full.positive || current.positive,
-            improvement: full.improvement || current.improvement,
-          };
-        });
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        if (!cancelled) setSelectedDetailLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [projectId, selectedDetail?.id]);
 
   const toggleSaveComment = (id: string) => {
     setSavedCommentIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
@@ -1159,13 +1132,13 @@ export default function TeamDashboard({
               <div className="rounded-2xl border border-emerald-100 bg-emerald-50/60 p-4">
                 <p className="text-[10px] font-black uppercase tracking-widest text-emerald-600">Lo positivo</p>
                 <div className="mt-2 max-h-[50vh] overflow-y-auto pr-1">
-                  <p className="text-sm font-medium leading-relaxed text-slate-700">&ldquo;{selectedDetailLoading ? "Cargando comentario completo..." : selectedDetail.positive || "Sin respuesta"}&rdquo;</p>
+                  <p className="text-sm font-medium leading-relaxed text-slate-700">&ldquo;{selectedDetail.positive || "Sin respuesta"}&rdquo;</p>
                 </div>
               </div>
               <div className="rounded-2xl border border-blue-100 bg-blue-50/60 p-4">
                 <p className="text-[10px] font-black uppercase tracking-widest text-blue-600">Oportunidades de mejora</p>
                 <div className="mt-2 max-h-[50vh] overflow-y-auto pr-1">
-                  <p className="text-sm font-medium leading-relaxed text-slate-700">&ldquo;{selectedDetailLoading ? "Cargando comentario completo..." : selectedDetail.improvement || "Sin respuesta"}&rdquo;</p>
+                  <p className="text-sm font-medium leading-relaxed text-slate-700">&ldquo;{selectedDetail.improvement || "Sin respuesta"}&rdquo;</p>
                 </div>
               </div>
             </div>
@@ -1369,88 +1342,52 @@ export default function TeamDashboard({
       )}
 
       {activeSchool !== "Todos los colegios" && (sharedFamiliesLoading || sharedFamilies) && (
-        <div className="mb-6 rounded-[28px] border border-white bg-white/80 p-5 shadow-xl backdrop-blur-xl">
-          <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="mb-6 rounded-[24px] border border-sky-100 bg-sky-50/80 p-5 shadow-sm">
+          <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
             <div>
-              <h3 className="font-display text-xl font-black text-slate-900">Dónde más tienen hijos estas familias</h3>
-              <p className="mt-1 max-w-3xl text-xs font-semibold leading-relaxed text-slate-500">
-                Muestra si las familias de {shortSchoolName(activeSchool)} tienen hijos solo en este colegio o también en otros colegios del mismo año.
+              <p className="text-[10px] font-black uppercase tracking-widest text-sky-700">
+                Dónde más tienen hijos estas familias
               </p>
-              {sharedFamilies?.year && (
-                <p className="mt-1 text-[11px] font-bold text-sky-700">Año {sharedFamilies.year}</p>
-              )}
+              <p className="mt-1 text-xs font-semibold text-sky-900">
+                Muestra los recorridos familiares dentro del mismo polo.
+              </p>
             </div>
-            <HelpTip
-              title="Familias compartidas"
-              body="Se calcula desde el padrón familiar confirmado. Solo aparece cuando seleccionás un colegio para evitar cargar cruces pesados en la vista general."
-            />
+            {sharedFamilies?.year && (
+              <p className="text-[11px] font-bold text-sky-700">Año {sharedFamilies.year}</p>
+            )}
           </div>
 
           {sharedFamiliesLoading && !sharedFamilies?.resumen ? (
-            <div className="mt-4 rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-4 text-xs font-semibold text-slate-500">
-              Cargando composición familiar del colegio seleccionado…
-            </div>
+            <p className="mt-4 rounded-xl border border-sky-100 bg-white px-3 py-2 text-xs font-black text-sky-700">
+              Calculando composición entre colegios...
+            </p>
           ) : !sharedFamilies?.resumen ? (
-            <div className="mt-4 rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-4 text-xs font-semibold text-slate-500">
-              {sharedFamilies?.mensaje || "No se encontró composición familiar para este colegio/año. Revisá que el padrón esté cargado y confirmado."}
+            <p className="mt-4 rounded-xl border border-amber-100 bg-white px-3 py-2 text-xs font-black text-amber-700">
+              {sharedFamilies?.mensaje || "No se encontró composición familiar para este colegio/año."}
+            </p>
+          ) : Array.isArray(sharedFamilies?.combinaciones) && sharedFamilies.combinaciones.length > 0 ? (
+            <div className="mt-4 overflow-x-auto rounded-2xl border border-sky-100 bg-white">
+              <table className="min-w-full text-xs">
+                <thead className="bg-sky-50 text-sky-800">
+                  <tr>
+                    <th className="px-3 py-3 text-left font-black uppercase tracking-widest">Recorrido familiar</th>
+                    <th className="px-3 py-3 text-right font-black uppercase tracking-widest">Familias</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sharedFamilies.combinaciones.map((item: any) => (
+                    <tr key={String(item?.label || "-")} className="border-t border-sky-50 text-slate-700">
+                      <td className="px-3 py-3 font-bold">{item?.label || "Sin recorrido"}</td>
+                      <td className="px-3 py-3 text-right font-black text-sky-800">{Number(item?.familias || 0)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           ) : (
-            <div className="mt-5 space-y-4">
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                <KpiCard
-                  title="Familias del colegio"
-                  value={sharedFamiliesTotal}
-                  subtitle="Universo detectado"
-                  icon={<Users size={18} weight="fill" className="text-sky-500" />}
-                  accent="text-slate-900"
-                />
-                <KpiCard
-                  title="Solo en este colegio"
-                  value={Number(sharedFamilies.resumen?.soloEsteColegio || 0)}
-                  subtitle="No comparten con otros colegios"
-                  accent="text-emerald-600"
-                />
-                <KpiCard
-                  title="Compartidas"
-                  value={sharedFamiliesSharedTotal}
-                  subtitle="Tienen hijos en otros colegios"
-                  accent="text-blue-600"
-                />
-              </div>
-
-              {(sharedFamilyRelationCards.length > 0 || sharedFamilyOtherSchoolCards.length > 0) && (
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
-                  {[...sharedFamilyRelationCards, ...sharedFamilyOtherSchoolCards].map((item) => (
-                    <div key={item.label} className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
-                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">{item.label}</p>
-                      <p className="mt-2 font-display text-3xl font-black text-slate-900">{item.value}</p>
-                      <p className="mt-1 text-[10px] font-semibold text-slate-500">familias</p>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {Array.isArray(sharedFamilies.combinaciones) && sharedFamilies.combinaciones.length > 0 && (
-                <div className="overflow-x-auto rounded-2xl border border-slate-100 bg-white">
-                  <table className="min-w-full text-xs">
-                    <thead className="bg-slate-50 text-slate-600">
-                      <tr>
-                        <th className="px-3 py-2 text-left">Combinación de colegios</th>
-                        <th className="px-3 py-2 text-right">Familias</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {sharedFamilies.combinaciones.map((item: any) => (
-                        <tr key={String(item?.label || "-")} className="border-t border-slate-100 text-slate-700">
-                          <td className="px-3 py-2 font-black">{item?.label || "Sin combinación"}</td>
-                          <td className="px-3 py-2 text-right font-black text-blue-700">{Number(item?.familias || 0)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
+            <p className="mt-4 rounded-xl border border-sky-100 bg-white px-3 py-2 text-xs font-black text-sky-700">
+              No hay recorridos familiares para mostrar.
+            </p>
           )}
         </div>
       )}
@@ -1633,15 +1570,54 @@ export default function TeamDashboard({
                   {syncingProjectConfig ? "Sincronizando..." : "Sincronizar ahora"}
                 </button>
                 {canEditConfig && (
-                  <button 
-                    onClick={() => setIsCreatingCat(!isCreatingCat)} 
-                    className="flex items-center gap-1 rounded-lg bg-white px-3 py-1.5 text-[10px] font-black uppercase tracking-widest text-blue-600 shadow-sm transition-all hover:bg-blue-600 hover:text-white"
-                  >
-                    <Plus size={12} weight="bold" /> Nueva
-                  </button>
+                  <>
+                    <button
+                      onClick={openCopyThemesPanel}
+                      className="rounded-lg border border-indigo-200 bg-white px-3 py-1.5 text-[10px] font-black uppercase tracking-widest text-indigo-700 shadow-sm transition-all hover:bg-indigo-50"
+                    >
+                      Copiar categorías
+                    </button>
+                    <button 
+                      onClick={() => setIsCreatingCat(!isCreatingCat)} 
+                      className="flex items-center gap-1 rounded-lg bg-white px-3 py-1.5 text-[10px] font-black uppercase tracking-widest text-blue-600 shadow-sm transition-all hover:bg-blue-600 hover:text-white"
+                    >
+                      <Plus size={12} weight="bold" /> Nueva
+                    </button>
+                  </>
                 )}
               </div>
             </div>
+            {canEditConfig && copyThemesOpen && (
+              <div className="mb-3 grid grid-cols-1 gap-2 rounded-xl border border-indigo-100 bg-white p-3 sm:grid-cols-[1fr_auto]">
+                <select
+                  value={copySourceProjectId}
+                  onChange={(e) => setCopySourceProjectId(e.target.value)}
+                  className="rounded-lg border border-indigo-100 bg-indigo-50/30 px-3 py-2 text-xs font-bold text-slate-700 outline-none focus:border-indigo-300"
+                >
+                  <option value="">Elegí proyecto origen...</option>
+                  {copySourceProjects
+                    .filter((p: any) => String(p?.id) !== String(projectId))
+                    .map((p: any) => (
+                      <option key={p.id} value={p.id}>{String(p.nombre || "Proyecto")}</option>
+                    ))}
+                </select>
+                <button
+                  onClick={copyThemesFromProject}
+                  disabled={!copySourceProjectId || copyThemesLoading}
+                  className="rounded-lg bg-indigo-600 px-4 py-2 text-xs font-black text-white transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {copyThemesLoading ? "Copiando..." : "Copiar acá"}
+                </button>
+                <p className="sm:col-span-2 text-[11px] font-bold text-indigo-700">
+                  Reemplaza las categorías actuales y guarda respaldo automático en el historial.
+                </p>
+              </div>
+            )}
+            {copyThemesMessage && (
+              <p className="mb-3 rounded-xl border border-indigo-100 bg-white px-3 py-2 text-xs font-black text-indigo-700">
+                {copyThemesMessage}
+              </p>
+            )}
             {syncMessage && (
               <p className="mb-3 rounded-xl border border-blue-100 bg-white px-3 py-2 text-xs font-black text-blue-700">
                 {syncMessage}

@@ -46,6 +46,7 @@ import {
   obtenerHistorialTemasProyectoDB,
   obtenerParticipacionFamiliarProyectoDB,
   obtenerFamiliasCompartidasProyectoDB,
+  copiarTemasDesdeProyectoDB,
 } from "../app/actions";
 
 // ─────────────────────────────────────────────
@@ -395,6 +396,58 @@ const getMostFrequentYear = (rows: any[]): number => {
 
 const percentage = (part: number, total: number) => (total ? Math.round((part / total) * 100) : 0);
 
+const clientActionMemoryCache = new Map<string, any>();
+const clientActionInflightCache = new Map<string, Promise<any>>();
+
+const readClientActionSessionCache = (key: string) => {
+  if (typeof window === "undefined" || !key) return null;
+  try {
+    const raw = window.sessionStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+};
+
+const writeClientActionSessionCache = (key: string, data: any) => {
+  if (typeof window === "undefined" || !key || data === undefined) return;
+  try {
+    window.sessionStorage.setItem(key, JSON.stringify(data));
+  } catch {
+    // Cache opcional: si se llena storage, no rompemos la pantalla.
+  }
+};
+
+const cachedClientAction = <T,>(key: string, loader: () => Promise<T>) => {
+  if (!key) return loader();
+
+  if (clientActionMemoryCache.has(key)) {
+    return Promise.resolve(clientActionMemoryCache.get(key) as T);
+  }
+
+  const sessionCached = readClientActionSessionCache(key);
+  if (sessionCached !== null) {
+    clientActionMemoryCache.set(key, sessionCached);
+    return Promise.resolve(sessionCached as T);
+  }
+
+  const existing = clientActionInflightCache.get(key);
+  if (existing) return existing as Promise<T>;
+
+  const request = loader()
+    .then((data) => {
+      clientActionMemoryCache.set(key, data);
+      writeClientActionSessionCache(key, data);
+      return data;
+    })
+    .finally(() => {
+      clientActionInflightCache.delete(key);
+    });
+
+  clientActionInflightCache.set(key, request);
+  return request;
+};
+
 const THEMES_LIST: DirectorCustomTheme[] = [
   { id: "Acoso y Convivencia", keywords: ["bullying", "acoso", "pelea", "maltrato", "amigos", "compañeros", "convivencia", "ambiente", "respeto", "burlas"] },
   { id: "Nivel Académico", keywords: ["profesor", "profe", "enseñanza", "clase", "nivel", "academico", "docente", "tarea", "exigencia", "pedagogico", "aprender", "ingles", "bilingue", "formacion"] },
@@ -636,6 +689,10 @@ export default function DirectorDashboard({
   const [themesHydrated, setThemesHydrated] = useState(false);
   const [themesSyncing, setThemesSyncing] = useState(false);
   const [themesSyncMessage, setThemesSyncMessage] = useState("");
+  const [copyThemesOpen, setCopyThemesOpen] = useState(false);
+  const [copySourceProjectId, setCopySourceProjectId] = useState("");
+  const [copyThemesLoading, setCopyThemesLoading] = useState(false);
+  const [copyThemesMessage, setCopyThemesMessage] = useState("");
   const lastSavedThemesKeyRef = useRef<string>("");
   const skipNextThemeSaveRef = useRef(false);
   const [isCreatingTheme, setIsCreatingTheme] = useState(false);
@@ -681,7 +738,7 @@ export default function DirectorDashboard({
 
     setFamilyParticipationLoading(true);
 
-    obtenerParticipacionFamiliarProyectoDB(projectId)
+    cachedClientAction(`apdes:action:family-participation:${projectId}`, () => obtenerParticipacionFamiliarProyectoDB(projectId))
       .then((data) => {
         if (!mounted) return;
         setFamilyParticipation(data);
@@ -748,7 +805,10 @@ export default function DirectorDashboard({
 
     setSharedFamiliesLoading(true);
 
-    obtenerFamiliasCompartidasProyectoDB(projectId, sharedFamiliesTargetSchool)
+    cachedClientAction(
+      `apdes:action:shared-families:${projectId}:${normalize(sharedFamiliesTargetSchool)}`,
+      () => obtenerFamiliasCompartidasProyectoDB(projectId, sharedFamiliesTargetSchool),
+    )
       .then((data) => {
         if (!mounted) return;
         setSharedFamilies(data);
@@ -880,9 +940,8 @@ export default function DirectorDashboard({
   useEffect(() => {
     let mounted = true;
 
-    Promise.allSettled([listarProyectosDB(), listarProyectosComparacionNpsDB()]).then((results) => {
-       if (!mounted) return;
-
+    cachedClientAction(`apdes:action:director-projects:${projectId || "global"}`, async () => {
+       const results = await Promise.allSettled([listarProyectosDB(), listarProyectosComparacionNpsDB()]);
        const visibleProjects = results[0].status === "fulfilled"
          ? (Array.isArray(results[0].value) ? results[0].value : ((results[0].value as any)?.rows || []))
          : [];
@@ -894,7 +953,9 @@ export default function DirectorDashboard({
        [...visibleProjects, ...compareProjects].forEach((p: any) => {
          if (p?.id) mergedMap.set(String(p.id), p);
        });
-       const data = Array.from(mergedMap.values());
+       return Array.from(mergedMap.values());
+    }).then((data) => {
+       if (!mounted) return;
 
        const currentProjectId = projectId || stats.schoolData[0]?.projectId;
        const currentFromCatalog = data.find((p: any) => String(p?.id) === String(currentProjectId));
@@ -1208,7 +1269,7 @@ export default function DirectorDashboard({
       return;
     }
 
-    obtenerTemasProyectoDB(projectId)
+    cachedClientAction(`apdes:action:director-themes:${projectId}`, () => obtenerTemasProyectoDB(projectId))
       .then((themes) => {
         const normalized = cleanThemes(themes);
 
@@ -1236,7 +1297,7 @@ export default function DirectorDashboard({
   }, [projectId]);
 
   useEffect(() => {
-    if (!projectId || !themesHydrated) return;
+    if (!projectId || !themesHydrated || !canEditThemes) return;
 
     const currentKey = themesKey(allThemes);
     if (skipNextThemeSaveRef.current) {
@@ -1251,7 +1312,7 @@ export default function DirectorDashboard({
         setThemesSyncMessage("Categorías guardadas.");
       })
       .catch(() => setThemesSyncMessage("No se pudieron guardar las categorías."));
-  }, [allThemes, projectId, themesHydrated]);
+  }, [allThemes, projectId, themesHydrated, canEditThemes]);
 
   // Evitamos sincronizaciones automáticas en segundo plano porque disparaban POSTs
   // pesados en /dashboard/surveys. Para traer cambios de otra PC/cuenta, usar
@@ -1293,6 +1354,37 @@ export default function DirectorDashboard({
         setHistoryOpen(true);
       })
       .finally(() => setThemesSyncing(false));
+  };
+
+  const copyThemesFromProject = () => {
+    if (!canEditThemes || !projectId || !copySourceProjectId) return;
+
+    const sourceProject = allProjects.find((p: any) => String(p?.id) === String(copySourceProjectId));
+    const sourceName = String(sourceProject?.nombre || "el proyecto seleccionado");
+    const confirmed = window.confirm(
+      `Vas a reemplazar las categorías de este proyecto con las de “${sourceName}”.\n\nAntes de copiar, se guarda un respaldo en el historial para poder volver atrás. ¿Confirmás?`
+    );
+    if (!confirmed) return;
+
+    setCopyThemesLoading(true);
+    setCopyThemesMessage("Copiando categorías...");
+
+    copiarTemasDesdeProyectoDB(projectId, copySourceProjectId)
+      .then((result: any) => {
+        const normalized = cleanThemes(result?.themes);
+        const nextKey = themesKey(normalized);
+        lastSavedThemesKeyRef.current = nextKey;
+        skipNextThemeSaveRef.current = true;
+        setAllThemes(normalized);
+        setCommentTheme("Todos");
+        setCopyThemesMessage(`Categorías copiadas desde “${String(result?.sourceProjectName || sourceName)}”. Se guardó respaldo en el historial.`);
+        setCopyThemesOpen(false);
+        setCopySourceProjectId("");
+      })
+      .catch((err: any) => {
+        setCopyThemesMessage(err?.message || "No se pudieron copiar las categorías.");
+      })
+      .finally(() => setCopyThemesLoading(false));
   };
 
   const applyThemeHistoryItem = (item: ThemeHistoryItem) => {
@@ -1994,7 +2086,6 @@ export default function DirectorDashboard({
       </div>
 
       {/* LECTURA DE COMENTARIOS */}
-      {canEditThemes && (
       <div className="rounded-[32px] border border-white bg-white/85 shadow-xl backdrop-blur-xl flex flex-col overflow-hidden">
         
         <div className="p-6 border-b border-slate-100 flex flex-col gap-5 bg-slate-50/50">
@@ -2142,7 +2233,45 @@ export default function DirectorDashboard({
                     >
                       {themesSyncing ? "Sincronizando..." : "Sincronizar ahora"}
                     </button>
+                    <button
+                      onClick={() => {
+                        setCopyThemesOpen((prev) => !prev);
+                        setCopyThemesMessage("");
+                      }}
+                      className="rounded-xl border border-indigo-200 bg-white px-3 py-2 text-[11px] font-black text-indigo-700 transition-colors hover:bg-indigo-50"
+                    >
+                      Copiar categorías
+                    </button>
                   </div>
+                )}
+                {canEditThemes && copyThemesOpen && (
+                  <div className="mt-3 grid grid-cols-1 gap-2 rounded-2xl border border-indigo-100 bg-indigo-50/60 p-3 lg:grid-cols-[1fr_auto]">
+                    <select
+                      value={copySourceProjectId}
+                      onChange={(e) => setCopySourceProjectId(e.target.value)}
+                      className="rounded-xl border border-indigo-100 bg-white px-3 py-2 text-xs font-bold text-slate-700 outline-none focus:border-indigo-300"
+                    >
+                      <option value="">Elegí proyecto origen...</option>
+                      {allProjects
+                        .filter((p: any) => String(p?.id) !== String(projectId))
+                        .map((p: any) => (
+                          <option key={p.id} value={p.id}>{String(p.nombre || "Proyecto")}</option>
+                        ))}
+                    </select>
+                    <button
+                      onClick={copyThemesFromProject}
+                      disabled={!copySourceProjectId || copyThemesLoading}
+                      className="rounded-xl bg-indigo-600 px-4 py-2 text-xs font-black text-white transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {copyThemesLoading ? "Copiando..." : "Copiar acá"}
+                    </button>
+                    <p className="lg:col-span-2 text-[11px] font-bold text-indigo-700">
+                      Reemplaza las categorías actuales y guarda respaldo automático en el historial.
+                    </p>
+                  </div>
+                )}
+                {canEditThemes && copyThemesMessage && (
+                  <p className="mt-2 text-[11px] font-bold text-indigo-700">{copyThemesMessage}</p>
                 )}
                 {canEditThemes && themesSyncMessage && (
                   <p className="mt-2 text-[11px] font-bold text-slate-500">{themesSyncMessage}</p>
@@ -2270,7 +2399,6 @@ export default function DirectorDashboard({
         </div>
 
       </div>
-      )}
       {historyOpen && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/40 p-4" onClick={() => setHistoryOpen(false)}>
           <div className="max-h-[70vh] w-full max-w-2xl overflow-auto rounded-2xl bg-white p-4 shadow-2xl" onClick={(e) => e.stopPropagation()}>

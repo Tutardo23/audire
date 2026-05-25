@@ -23,7 +23,7 @@ import {
 import { SignOutButton, useUser } from "@clerk/nextjs";
 import {
   eliminarEncuestasDB,
-  obtenerEncuestasComparativoPoloDB,
+  obtenerEncuestasComparativoPoloBatchDB,
   obtenerEncuestasDB,
   subirEncuestasBatch,
   listarProyectosDB,
@@ -268,6 +268,35 @@ const schoolLogoPath = (school: string) => {
   return "";
 };
 
+const connectedRowsCacheKey = (projectId: string, idsKey: string) =>
+  projectId && idsKey ? `apdes:connected-rows:${projectId}:${idsKey}` : "";
+
+const readConnectedRowsCache = (projectId: string, idsKey: string): SurveyRow[] | null => {
+  if (typeof window === "undefined") return null;
+  const key = connectedRowsCacheKey(projectId, idsKey);
+  if (!key) return null;
+
+  try {
+    const raw = window.sessionStorage.getItem(key);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+};
+
+const writeConnectedRowsCache = (projectId: string, idsKey: string, rows: SurveyRow[]) => {
+  if (typeof window === "undefined") return;
+  const key = connectedRowsCacheKey(projectId, idsKey);
+  if (!key) return;
+
+  try {
+    window.sessionStorage.setItem(key, JSON.stringify(rows));
+  } catch {
+    // Si el navegador bloquea storage o se llena, no rompemos el dashboard.
+  }
+};
+
 // ─────────────────────────────────────────────
 // PÁGINA PRINCIPAL Y NAVEGACIÓN
 // ─────────────────────────────────────────────
@@ -433,6 +462,10 @@ function AnalyticsDashboardLive() {
     return Array.from(union);
   }, [connectedProjectIds, poloCompareProjectIds, historicalCompareProjectIds, projectId]);
 
+  const effectiveCompareProjectIdsKey = useMemo(() => {
+    return effectiveCompareProjectIds.map(String).sort().join("|");
+  }, [effectiveCompareProjectIds]);
+
   // CARGA DE DATOS
   useEffect(() => {
     let cancelled = false;
@@ -572,33 +605,54 @@ function AnalyticsDashboardLive() {
   useEffect(() => {
     let cancelled = false;
 
-    const ids = effectiveCompareProjectIds.map(String).sort();
-
     async function loadConnectedRows() {
+      // Esta carga es SOLO para la Vista Director.
+      // Equipo no usa NPS histórico/conectado; si la dejamos activa, dispara un POST por cada proyecto conectado.
+      if (effectiveViewMode !== "director") {
+        setConnectedRows([]);
+        setConnectedRowsLoading(false);
+        return;
+      }
+
+      const ids = effectiveCompareProjectIdsKey
+        ? effectiveCompareProjectIdsKey.split("|").filter(Boolean)
+        : [];
+
       if (ids.length === 0) {
         setConnectedRows([]);
         setConnectedRowsLoading(false);
         return;
       }
 
-      // Importante: no usamos cache acá. Si queda un cache viejo vacío, el NPS comparativo
-      // parece “no hacer nada”. La consulta ahora es liviana, así que conviene pedirla real.
+      const cached = readConnectedRowsCache(projectId, effectiveCompareProjectIdsKey);
+      if (cached) {
+        setConnectedRows(cached);
+        setConnectedRowsLoading(false);
+        return;
+      }
+
       setConnectedRowsLoading(true);
 
       try {
-        const settledDatasets = await Promise.allSettled(
-          ids.map(async (id) => ({
-            projectId: id,
-            projectName: allProjects.find((p) => String(p.id) === String(id))?.nombre || "",
-            rows: await obtenerEncuestasComparativoPoloDB(id),
-          }))
-        );
+        const batchRows = await obtenerEncuestasComparativoPoloBatchDB(ids);
         if (cancelled) return;
 
-        // Si un proyecto auxiliar falla por permisos o porque no tiene datos, no anulamos toda la comparación.
-        const datasets = settledDatasets
-          .filter((result): result is PromiseFulfilledResult<any> => result.status === "fulfilled")
-          .map((result) => result.value);
+        // Una sola Server Action trae todos los proyectos comparativos.
+        // Evita disparar un POST por cada proyecto/año y mantiene funcionando el NPS comparado.
+        const rowsByProject = new Map<string, any[]>();
+        (Array.isArray(batchRows) ? batchRows : []).forEach((row: any) => {
+          const sourceProjectId = String(row?.project_id || row?.projectId || "");
+          if (!sourceProjectId) return;
+          const bucket = rowsByProject.get(sourceProjectId) || [];
+          bucket.push(row);
+          rowsByProject.set(sourceProjectId, bucket);
+        });
+
+        const datasets = ids.map((id) => ({
+          projectId: id,
+          projectName: allProjects.find((p) => String(p.id) === String(id))?.nombre || "",
+          rows: rowsByProject.get(String(id)) || [],
+        }));
 
         const rows = datasets.flatMap((dataset: any) => {
           const lista: any[] = Array.isArray(dataset.rows) ? dataset.rows : dataset.rows?.rows || [];
@@ -638,6 +692,7 @@ function AnalyticsDashboardLive() {
         });
 
         setConnectedRows(rows);
+        writeConnectedRowsCache(projectId, effectiveCompareProjectIdsKey, rows);
       } catch {
         if (!cancelled) setConnectedRows([]);
       } finally {
@@ -649,7 +704,7 @@ function AnalyticsDashboardLive() {
     return () => {
       cancelled = true;
     };
-  }, [effectiveCompareProjectIds, allProjects, projectId]);
+  }, [effectiveViewMode, effectiveCompareProjectIdsKey, allProjects, projectId]);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!projectId) { router.push("/dashboard"); return; }

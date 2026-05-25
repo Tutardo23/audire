@@ -654,6 +654,64 @@ export async function obtenerEncuestasComparativoPoloDB(projectId: string) {
   return result;
 }
 
+
+export async function obtenerEncuestasComparativoPoloBatchDB(projectIdsUnsafe: string[]) {
+  const userId = await requireUserId();
+  const rawIds = Array.isArray(projectIdsUnsafe) ? projectIdsUnsafe : [];
+  const uniqueIds = Array.from(new Set(rawIds.map((id) => String(id || "").trim()).filter(Boolean)))
+    .filter((id) => UUIDSchema.safeParse(id).success)
+    .slice(0, 40);
+
+  if (uniqueIds.length === 0) return [];
+
+  const scope = await getAccessScope();
+
+  let allowedIds = uniqueIds;
+  if (scope.role === "admin" && scope.hasProjectScope) {
+    const allowedSet = new Set([...scope.projectIds, ...scope.compareProjectIds].map(String));
+    allowedIds = uniqueIds.filter((id) => allowedSet.has(id));
+  } else if (scope.role !== "admin") {
+    const allowedSet = new Set([...scope.projectIds, ...scope.compareProjectIds].map(String));
+    allowedIds = uniqueIds.filter((id) => allowedSet.has(id));
+  }
+
+  if (allowedIds.length === 0) return [];
+
+  const shouldFilterByPolo = scope.role === "director" || scope.role === "equipo";
+  const poloPattern = shouldFilterByPolo ? sqlLikeNormalizedPattern(scope.polo) : "";
+  const cacheKey = scopeCacheKey("surveys:polo-batch:v1", userId, scope, [allowedIds.sort().join(",")]);
+  const cached = getServerCache<any[]>(cacheKey);
+  if (cached) return cached;
+
+  let rows: any[];
+  if (shouldFilterByPolo && poloPattern) {
+    rows = await sql`
+      SELECT project_id::text AS project_id, id, colegio, polo, score, NULL::text AS created_at, NULL::text AS date
+      FROM encuestas
+      WHERE project_id = ANY(${allowedIds}::uuid[])
+        AND (
+          lower(translate(coalesce(polo, ''), 'ÁÉÍÓÚÜÑáéíóúüñ', 'AEIOUUNaeiouun')) LIKE ${poloPattern}
+          OR ${normalize(scope.polo || "")} LIKE '%' || lower(translate(coalesce(polo, ''), 'ÁÉÍÓÚÜÑáéíóúüñ', 'AEIOUUNaeiouun')) || '%'
+        )
+      ORDER BY project_id, id DESC
+    `;
+  } else {
+    rows = await sql`
+      SELECT project_id::text AS project_id, id, colegio, polo, score, NULL::text AS created_at, NULL::text AS date
+      FROM encuestas
+      WHERE project_id = ANY(${allowedIds}::uuid[])
+      ORDER BY project_id, id DESC
+    `;
+  }
+
+  const result = shouldFilterByPolo && scope.polo
+    ? (rows as any[]).filter((r) => matchesScopedText(r?.polo, scope.polo))
+    : rows;
+
+  setServerCache(cacheKey, result, 180_000);
+  return result;
+}
+
 export async function obtenerEncuestasComparacionLigeraDB(projectId: string) {
   const userId = await requireUserId();
   if (!projectId) return [];
@@ -1054,6 +1112,68 @@ export async function obtenerHistorialTemasProyectoDB(projectId: string) {
 }
 
 
+export async function copiarTemasDesdeProyectoDB(targetProjectId: string, sourceProjectId: string) {
+  const userId = await requireAdmin();
+  UUIDSchema.parse(targetProjectId);
+  UUIDSchema.parse(sourceProjectId);
+  if (targetProjectId === sourceProjectId) throw new Error("Elegí un proyecto distinto para copiar categorías");
+
+  const scope = await getAccessScope();
+  await assertProjectAccess(targetProjectId, userId, scope);
+  await assertProjectAccess(sourceProjectId, userId, scope);
+  await ensureProjectThemesTable();
+  await ensureProjectThemesHistoryTable();
+
+  const [sourceRows, targetRows, sourceProjectRows] = await Promise.all([
+    sql`SELECT themes FROM project_themes WHERE project_id = ${sourceProjectId}::uuid LIMIT 1`,
+    sql`SELECT themes FROM project_themes WHERE project_id = ${targetProjectId}::uuid LIMIT 1`,
+    sql`SELECT nombre FROM projects WHERE id = ${sourceProjectId}::uuid LIMIT 1`,
+  ]);
+
+  const sourceRaw = (sourceRows?.[0] as { themes?: unknown } | undefined)?.themes;
+  const targetRaw = (targetRows?.[0] as { themes?: unknown } | undefined)?.themes;
+  const sourceParsed = ProjectThemesSchema.safeParse(sourceRaw);
+  const targetParsed = ProjectThemesSchema.safeParse(targetRaw);
+  const sourceThemes = sourceParsed.success ? sourceParsed.data : [];
+  const previousThemes = targetParsed.success ? targetParsed.data : [];
+
+  if (sourceThemes.length === 0) throw new Error("El proyecto elegido no tiene categorías guardadas para copiar");
+
+  const themes = sourceThemes
+    .map((t) => ({
+      id: String(t.id).trim(),
+      keywords: Array.from(new Set(t.keywords.map((x) => String(x).trim()).filter(Boolean))),
+    }))
+    .filter((t) => t.id && t.keywords.length > 0);
+
+  await sql`
+    INSERT INTO project_themes (project_id, themes, updated_by, updated_at)
+    VALUES (${targetProjectId}::uuid, ${JSON.stringify(themes)}::jsonb, ${userId}, now())
+    ON CONFLICT (project_id)
+    DO UPDATE SET themes = EXCLUDED.themes, updated_by = EXCLUDED.updated_by, updated_at = now()
+  `;
+
+  const sourceProjectName = String((sourceProjectRows?.[0] as { nombre?: unknown } | undefined)?.nombre ?? "Proyecto origen");
+  const historyPayload = [
+    {
+      type: "copied_from_project",
+      themeId: "categorías",
+      sourceProjectId,
+      sourceProjectName,
+      snapshotBefore: previousThemes,
+      snapshotAfter: themes,
+    },
+  ];
+
+  await sql`
+    INSERT INTO project_themes_history (project_id, changes, updated_by)
+    VALUES (${targetProjectId}::uuid, ${JSON.stringify(historyPayload)}::jsonb, ${userId})
+  `;
+
+  return { ok: true, themes, sourceProjectName };
+}
+
+
 const DEFAULT_TEAM_SETTINGS = {
   positiveToneRules: "agradezco, excelente, contento, feliz, recomiendo",
   constructiveToneRules: "deberia, mejorar, faltaria, sugerencia, podrian",
@@ -1255,6 +1375,8 @@ export async function importarFamiliasStagingDB(formData: FormData) {
     SET total_rows = ${inserted}, ok_rows = ${inserted}, error_rows = 0
     WHERE id = ${batchId}::uuid
   `;
+
+  await invalidateFamilySharedSnapshots(projectId);
 
   return { ok: true, batchId, inserted };
 }
@@ -1467,6 +1589,16 @@ export async function consolidarFamiliasDesdeStagingDB(batchId: string) {
         membersInserted += 1;
       }
     }
+  }
+
+  const affectedProjectRows = await sql`
+    SELECT DISTINCT project_id::text AS project_id
+    FROM family_staging_raw
+    WHERE batch_id = ${batchId}::uuid
+  ` as Array<{ project_id: string }>;
+
+  for (const row of affectedProjectRows) {
+    await invalidateFamilySharedSnapshots(row.project_id);
   }
 
   return { ok: true, batchId, familiesInserted, familiesUpdated, membersInserted, membersUpdated, rejected };
@@ -1803,6 +1935,7 @@ export async function borrarPadronFamiliasProyectoDB(projectId: string, group?: 
     await sql`DELETE FROM family_staging_raw WHERE project_id = ${projectId}::uuid`;
   }
 
+  await invalidateFamilySharedSnapshots(projectId);
   deleteServerCacheByPrefix("family:");
   deleteServerCacheByPrefix("projects:");
   return { ok: true };
@@ -1959,7 +2092,13 @@ export async function obtenerParticipacionFamiliarProyectoDB(projectId: string) 
   const scope = await getAccessScope();
   await assertProjectAccess(projectId, userId, scope);
 
-  const cacheKey = scopeCacheKey("family:participation:v2", userId, scope, [projectId]);
+  // IMPORTANTE:
+  // No filtramos por colegio/polo en servidor para participación familiar.
+  // Este snapshot es liviano (resumen + porColegio) y el filtrado visual ya se hace
+  // en DirectorDashboard/TeamDashboard con sameSchoolName(activeSchool).
+  // Filtrarlo acá rompía perfiles Director cuando por_colegio no traía polo,
+  // devolviendo 0 de 0 familias aunque el padrón existiera.
+  const cacheKey = `family:participation:full:v3:${projectId}`;
   const cached = getServerCache<any>(cacheKey);
   if (cached) return cached;
 
@@ -1990,44 +2129,20 @@ export async function obtenerParticipacionFamiliarProyectoDB(projectId: string) 
   if (!rows.length) return null;
 
   const row = rows[0];
-
-  let porColegio = Array.isArray(row.por_colegio) ? row.por_colegio : [];
-  const scopedRole = scope.role === "director" || scope.role === "equipo";
-
-  if (scopedRole) {
-    porColegio = porColegio.filter((item: any) => {
-      const bySchool = matchesScopedText(item?.colegio, scope.colegio);
-      const byPolo = matchesScopedText(item?.polo, scope.polo);
-      return bySchool && byPolo;
-    });
-  }
-
-  const resumenRecalculado = porColegio.length
-    ? {
-        totalFamilias: porColegio.reduce((acc: number, x: any) => acc + Number(x.totalFamilias || 0), 0),
-        familiasConRespuesta: porColegio.reduce((acc: number, x: any) => acc + Number(x.familiasConRespuesta || 0), 0),
-        soloMadre: porColegio.reduce((acc: number, x: any) => acc + Number(x.soloMadre || 0), 0),
-        soloPadre: porColegio.reduce((acc: number, x: any) => acc + Number(x.soloPadre || 0), 0),
-        ambos: porColegio.reduce((acc: number, x: any) => acc + Number(x.ambos || 0), 0),
-        ninguno: porColegio.reduce((acc: number, x: any) => acc + Number(x.ninguno || 0), 0),
-        madresRespondieron: porColegio.reduce((acc: number, x: any) => acc + Number(x.madresRespondieron || 0), 0),
-        padresRespondieron: porColegio.reduce((acc: number, x: any) => acc + Number(x.padresRespondieron || 0), 0),
-      }
-    : row.resumen;
-
-  const totalFamilias = Number(resumenRecalculado.totalFamilias || 0);
-  const familiasConRespuesta = Number(resumenRecalculado.familiasConRespuesta || 0);
-  const ambos = Number(resumenRecalculado.ambos || 0);
+  const porColegio = Array.isArray(row.por_colegio) ? row.por_colegio : [];
+  const totalFamilias = Number(row.resumen?.totalFamilias || 0);
+  const familiasConRespuesta = Number(row.resumen?.familiasConRespuesta || 0);
+  const ambos = Number(row.resumen?.ambos || 0);
 
   const result = {
     projectId: row.project_id,
     resumen: {
-      ...resumenRecalculado,
+      ...(row.resumen || {}),
       porcentajeParticipacion: totalFamilias ? Math.round((familiasConRespuesta / totalFamilias) * 1000) / 10 : 0,
       porcentajeAmbos: totalFamilias ? Math.round((ambos / totalFamilias) * 1000) / 10 : 0,
     },
     porColegio,
-    diagnostico: scopedRole ? null : row.diagnostico,
+    diagnostico: scope.role === "admin" ? row.diagnostico : null,
     updatedAt: row.updated_at,
   };
 
@@ -2546,6 +2661,170 @@ const setSharedFamiliesCache = (key: string, data: any) => {
   }
 };
 
+
+async function ensureFamilySharedSnapshotsTable() {
+  await sql`
+    CREATE TABLE IF NOT EXISTS family_shared_snapshots (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      project_id uuid NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      year integer NOT NULL,
+      colegio_normalizado text NOT NULL,
+      colegio text NOT NULL,
+      resumen jsonb NOT NULL,
+      combinaciones jsonb NOT NULL,
+      proyectos_incluidos jsonb NOT NULL DEFAULT '[]'::jsonb,
+      total_familias_globales integer NOT NULL DEFAULT 0,
+      generated_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now(),
+      UNIQUE(project_id, year, colegio_normalizado)
+    )
+  `;
+
+  await sql`
+    CREATE INDEX IF NOT EXISTS idx_family_shared_snapshots_project_year_school
+    ON family_shared_snapshots(project_id, year, colegio_normalizado)
+  `;
+}
+
+function fcSnapshotSchoolKey(value: unknown): string {
+  return fcSchoolKey(value);
+}
+
+async function readFamilySharedSnapshot(params: {
+  projectId: string;
+  year: number;
+  targetSchool: string;
+}) {
+  const targetKey = fcSnapshotSchoolKey(params.targetSchool);
+  if (!targetKey) return null;
+
+  await ensureFamilySharedSnapshotsTable();
+
+  const rows = await sql`
+    SELECT
+      colegio,
+      resumen,
+      combinaciones,
+      proyectos_incluidos,
+      total_familias_globales,
+      updated_at
+    FROM family_shared_snapshots
+    WHERE project_id = ${params.projectId}::uuid
+      AND year = ${params.year}
+      AND colegio_normalizado = ${targetKey}
+    LIMIT 1
+  ` as Array<{
+    colegio: string;
+    resumen: any;
+    combinaciones: any;
+    proyectos_incluidos: any;
+    total_familias_globales: number;
+    updated_at: string;
+  }>;
+
+  const row = rows?.[0];
+  if (!row) return null;
+
+  return {
+    year: params.year,
+    targetSchool: row.colegio || params.targetSchool,
+    proyectosIncluidos: Array.isArray(row.proyectos_incluidos) ? row.proyectos_incluidos : [],
+    resumen: row.resumen || null,
+    combinaciones: Array.isArray(row.combinaciones) ? row.combinaciones : [],
+    porColegio: [],
+    totalFamiliasGlobales: Number(row.total_familias_globales || 0),
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString(),
+    fromSnapshot: true,
+  };
+}
+
+async function upsertFamilySharedSnapshots(params: {
+  projectId: string;
+  year: number;
+  proyectosIncluidos: Array<{ id: string; nombre: string; grupo: string }>;
+  totalFamiliasGlobales: number;
+  items: Array<{ colegio: string; resumen: any; combinaciones: any[] }>;
+}) {
+  if (!params.projectId || !params.year || params.items.length === 0) return;
+
+  await ensureFamilySharedSnapshotsTable();
+
+  const payload = params.items
+    .map((item) => ({
+      project_id: params.projectId,
+      year: params.year,
+      colegio_normalizado: fcSnapshotSchoolKey(item.colegio),
+      colegio: item.colegio,
+      resumen: item.resumen || {},
+      combinaciones: Array.isArray(item.combinaciones) ? item.combinaciones : [],
+      proyectos_incluidos: params.proyectosIncluidos,
+      total_familias_globales: Number(params.totalFamiliasGlobales || 0),
+    }))
+    .filter((item) => item.colegio_normalizado);
+
+  if (payload.length === 0) return;
+
+  await sql`
+    INSERT INTO family_shared_snapshots (
+      project_id,
+      year,
+      colegio_normalizado,
+      colegio,
+      resumen,
+      combinaciones,
+      proyectos_incluidos,
+      total_familias_globales,
+      generated_at,
+      updated_at
+    )
+    SELECT
+      x.project_id,
+      x.year,
+      x.colegio_normalizado,
+      x.colegio,
+      x.resumen,
+      x.combinaciones,
+      x.proyectos_incluidos,
+      x.total_familias_globales,
+      now(),
+      now()
+    FROM jsonb_to_recordset(${JSON.stringify(payload)}::jsonb) AS x(
+      project_id uuid,
+      year integer,
+      colegio_normalizado text,
+      colegio text,
+      resumen jsonb,
+      combinaciones jsonb,
+      proyectos_incluidos jsonb,
+      total_familias_globales integer
+    )
+    ON CONFLICT (project_id, year, colegio_normalizado)
+    DO UPDATE SET
+      colegio = EXCLUDED.colegio,
+      resumen = EXCLUDED.resumen,
+      combinaciones = EXCLUDED.combinaciones,
+      proyectos_incluidos = EXCLUDED.proyectos_incluidos,
+      total_familias_globales = EXCLUDED.total_familias_globales,
+      generated_at = now(),
+      updated_at = now()
+  `;
+}
+
+async function invalidateFamilySharedSnapshots(projectId: string) {
+  if (!projectId) return;
+  try {
+    await ensureFamilySharedSnapshotsTable();
+    await sql`DELETE FROM family_shared_snapshots WHERE project_id = ${projectId}::uuid`;
+  } catch {
+    // La invalidación no debe romper importaciones ni borrados.
+  }
+  deleteServerCacheByPrefix("family:");
+  const cache = getSharedFamiliesCacheStore();
+  for (const key of Array.from(cache.keys())) {
+    if (key.includes(projectId)) cache.delete(key);
+  }
+}
+
 export async function obtenerFamiliasCompartidasProyectoDB(projectId: string, selectedSchool?: string) {
   const userId = await requireUserId();
   if (!projectId) return null;
@@ -2589,16 +2868,30 @@ export async function obtenerFamiliasCompartidasProyectoDB(projectId: string, se
 
   if (projectIds.length === 0) return null;
 
-  const requestedSchoolForCache = selectedSchool && selectedSchool !== "Todos los colegios" ? selectedSchool : scope.colegio || "";
+  const proyectosIncluidos = projectRows.map((p) => ({ id: p.id, nombre: p.nombre, grupo: fcGroupLabel(p.nombre) }));
+  const requestedSchool = selectedSchool && selectedSchool !== "Todos los colegios" ? selectedSchool : scope.colegio || "";
+  const canonicalTarget = requestedSchool ? fcSchoolNameFromText(requestedSchool, currentProject.nombre) || requestedSchool : "";
+
+  const requestedSchoolForCache = requestedSchool || "";
   const sharedFamiliesCacheKey = [
-    "v2",
+    "v3-snapshot",
     projectId,
     year,
-    fcNormalize(requestedSchoolForCache || "todos"),
+    fcSnapshotSchoolKey(requestedSchoolForCache || "todos"),
     projectIds.slice().sort().join(","),
   ].join(":" );
   const cachedSharedFamilies = getSharedFamiliesCache(sharedFamiliesCacheKey);
   if (cachedSharedFamilies) return cachedSharedFamilies;
+
+  // Ahorro fuerte: si ya existe snapshot persistente, devolvemos JSON ya calculado.
+  // Esto evita volver a cruzar todo family_staging_raw cada vez que entra Director/Equipo.
+  if (canonicalTarget) {
+    const snapshot = await readFamilySharedSnapshot({ projectId, year, targetSchool: canonicalTarget });
+    if (snapshot) {
+      setSharedFamiliesCache(sharedFamiliesCacheKey, snapshot);
+      return snapshot;
+    }
+  }
 
   const rows = await sql`
     WITH latest_batches AS (
@@ -2634,7 +2927,7 @@ export async function obtenerFamiliasCompartidasProyectoDB(projectId: string, se
     return {
       year,
       targetSchool: selectedSchool || null,
-      proyectosIncluidos: projectRows.map((p) => ({ id: p.id, nombre: p.nombre, grupo: fcGroupLabel(p.nombre) })),
+      proyectosIncluidos,
       resumen: null,
       combinaciones: [],
       porColegio: [],
@@ -2702,9 +2995,6 @@ export async function obtenerFamiliasCompartidasProyectoDB(projectId: string, se
     families.set(familyRoot, family);
   }
 
-  const requestedSchool = selectedSchool && selectedSchool !== "Todos los colegios" ? selectedSchool : scope.colegio || "";
-  const canonicalTarget = requestedSchool ? fcSchoolNameFromText(requestedSchool, currentProject.nombre) || requestedSchool : "";
-
   const schoolList = Array.from(schoolsSeen.values()).sort((a, b) => a.colegio.localeCompare(b.colegio));
 
   // Importante para la vista Admin / "Todos los colegios":
@@ -2724,22 +3014,48 @@ export async function obtenerFamiliasCompartidasProyectoDB(projectId: string, se
     ? schoolList.find((school) => fcMatchesSchoolName(school.colegio, canonicalTarget) || fcMatchesSchoolName(canonicalTarget, school.colegio))?.colegio || canonicalTarget
     : "";
 
-  const targetSummary = matchedTargetSchool ? fcBuildSummaryForSchool(matchedTargetSchool, families) : null;
+  // Persistimos snapshots para todos los colegios visibles del proyecto.
+  // La primera vez puede tardar, pero las siguientes entradas de Director/Equipo leen JSON rápido.
+  const snapshotsToSave = visibleSchoolList.map((school) => {
+    const built = fcBuildSummaryForSchool(school.colegio, families);
+    return {
+      colegio: school.colegio,
+      resumen: built.resumen,
+      combinaciones: built.combinaciones,
+    };
+  });
+
+  try {
+    await upsertFamilySharedSnapshots({
+      projectId,
+      year,
+      proyectosIncluidos,
+      totalFamiliasGlobales: families.size,
+      items: snapshotsToSave,
+    });
+  } catch (error) {
+    console.warn("No se pudieron guardar snapshots de familias compartidas", error);
+  }
+
+  const targetSnapshot = matchedTargetSchool
+    ? snapshotsToSave.find((item) => fcMatchesSchoolName(item.colegio, matchedTargetSchool))
+    : null;
 
   const porColegio = canonicalTarget
     ? []
-    : visibleSchoolList.map((school) => fcBuildSummaryForSchool(school.colegio, families).resumen);
+    : snapshotsToSave.map((item) => item.resumen);
 
   const result = {
     year,
     targetSchool: matchedTargetSchool || canonicalTarget || null,
-    proyectosIncluidos: projectRows.map((p) => ({ id: p.id, nombre: p.nombre, grupo: fcGroupLabel(p.nombre) })),
-    resumen: targetSummary?.resumen || null,
-    combinaciones: targetSummary?.combinaciones || [],
+    proyectosIncluidos,
+    resumen: targetSnapshot?.resumen || null,
+    combinaciones: targetSnapshot?.combinaciones || [],
     porColegio,
     totalFamiliasGlobales: families.size,
     updatedAt: new Date().toISOString(),
-    mensaje: targetSummary?.resumen?.totalFamilias
+    fromSnapshot: false,
+    mensaje: targetSnapshot?.resumen?.totalFamilias
       ? undefined
       : canonicalTarget
         ? `No se encontró composición familiar para ${canonicalTarget} en ${year}. Revisá que el nombre del colegio coincida con el universo cargado.`
