@@ -27,7 +27,7 @@ import {
   PieChart, Pie, Legend, RadarChart, PolarGrid, PolarAngleAxis, Radar,
   CartesianGrid, ScatterChart, Scatter, ZAxis, LabelList,
 } from "recharts";
-import { obtenerEncuestasDB } from "../../actions";
+import { obtenerEncuestasDB, obtenerTemasProyectoDB } from "../../actions";
 
 // ─────────────────────────────────────────────
 // SUSPENSE WRAPPER
@@ -67,6 +67,45 @@ const canonTag = (t: string) => {
   if (nt.startsWith("comunic")) return "Comunicación";
   return "General";
 };
+
+type ProjectTheme = { id: string; keywords: string[] };
+
+const BASE_TAGS = ["Docencia", "Infraestructura", "Normativas", "Actividades", "Comunicación", "General"];
+
+const cleanProjectThemes = (themes: unknown): ProjectTheme[] => {
+  if (!Array.isArray(themes)) return [];
+  return themes
+    .map((item) => {
+      const raw = item as { id?: unknown; name?: unknown; keywords?: unknown };
+      const id = String(raw.id ?? raw.name ?? "").trim();
+      const keywords = Array.isArray(raw.keywords)
+        ? raw.keywords.map((x) => String(x).trim()).filter(Boolean)
+        : [];
+      return id && keywords.length > 0 ? { id, keywords: Array.from(new Set(keywords)) } : null;
+    })
+    .filter(Boolean) as ProjectTheme[];
+};
+
+const getThemeLabels = (projectThemes: ProjectTheme[]) =>
+  projectThemes.length > 0 ? projectThemes.map((theme) => theme.id) : BASE_TAGS;
+
+const getRowThemeTags = (row: any, projectThemes: ProjectTheme[]) => {
+  if (projectThemes.length > 0) {
+    const text = normalize(`${row?.positive ?? ""} ${row?.improvement ?? ""}`);
+    const matched = projectThemes
+      .filter((theme) => theme.keywords.some((kw) => {
+        const key = normalize(kw);
+        return key.length > 0 && text.includes(key);
+      }))
+      .map((theme) => theme.id);
+
+    return matched.length > 0 ? matched : ["General"];
+  }
+
+  const tags: string[] = Array.isArray(row?.tags) ? row.tags.map(canonTag) : [];
+  return tags.length > 0 ? tags : ["General"];
+};
+
 
 const STOPWORDS = new Set([
   "de","la","el","y","a","en","que","los","las","un","una","por","para","con","no","es","se","al","del",
@@ -198,7 +237,7 @@ const countKeywordInRows = (rows: any[], keyword: string) => {
   return c;
 };
 
-const keywordByTag = (rows: any[], keyword: string) => {
+const keywordByTag = (rows: any[], keyword: string, projectThemes: ProjectTheme[] = []) => {
   const k = normalize(keyword);
   if (!k) return [];
   const map = new Map<string, number>();
@@ -207,9 +246,10 @@ const keywordByTag = (rows: any[], keyword: string) => {
     const re = new RegExp(`\\b${k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "g");
     const hits = (text.match(re) || []).length;
     if (!hits) continue;
-    const tags: string[] = Array.isArray(r.tags) ? r.tags : [];
-    const canon = tags.length ? tags.map(canonTag) : ["General"];
-    canon.forEach((t) => map.set(t, (map.get(t) || 0) + hits));
+
+    getRowThemeTags(r, projectThemes).forEach((tag) => {
+      map.set(tag, (map.get(tag) || 0) + hits);
+    });
   }
   return Array.from(map.entries()).sort((a, b) => b[1] - a[1]).map(([tag, count]) => ({ tag, count }));
 };
@@ -218,9 +258,9 @@ const keywordByTag = (rows: any[], keyword: string) => {
 // MAPA DE CALOR: Curso × Tema
 // ─────────────────────────────────────────────
 // Heatmap perfil × tema: para un colegio seleccionado
-const buildHeatmapByProfile = (rows: any[]) => {
-  const TAGS = ["Docencia","Infraestructura","Normativas","Actividades","Comunicación","General"];
-  const PROFILES = ["Promotor","Satisfecho","Insatisfecho"];
+const buildHeatmapByProfile = (rows: any[], themeLabels: string[], projectThemes: ProjectTheme[] = []) => {
+  const TAGS = themeLabels.length > 0 ? themeLabels : BASE_TAGS;
+  const PROFILES = ["Promotor", "Satisfecho", "Insatisfecho"];
   const cells: Record<string, Record<string, { sum: number; count: number }>> = {};
 
   for (const row of rows) {
@@ -228,8 +268,8 @@ const buildHeatmapByProfile = (rows: any[]) => {
     if (!PROFILES.includes(profile)) continue;
     const score = Number(row.score) || 0;
     if (!score) continue;
-    const tags: string[] = Array.isArray(row.tags) ? row.tags.map(canonTag) : ["General"];
-    for (const tag of tags) {
+
+    for (const tag of getRowThemeTags(row, projectThemes)) {
       if (!TAGS.includes(tag)) continue;
       if (!cells[profile]) cells[profile] = {};
       if (!cells[profile][tag]) cells[profile][tag] = { sum: 0, count: 0 };
@@ -240,8 +280,13 @@ const buildHeatmapByProfile = (rows: any[]) => {
   return { courses: PROFILES.filter(p => cells[p]), rowLabel: "perfil", tags: TAGS, cells };
 };
 
-const buildHeatmap = (rows: any[], groupBy: "curso" | "colegio" | "polo" = "colegio") => {
-  const TAGS = ["Docencia", "Infraestructura", "Normativas", "Actividades", "Comunicación", "General"];
+const buildHeatmap = (
+  rows: any[],
+  groupBy: "curso" | "colegio" | "polo" = "colegio",
+  themeLabels: string[] = BASE_TAGS,
+  projectThemes: ProjectTheme[] = [],
+) => {
+  const TAGS = themeLabels.length > 0 ? themeLabels : BASE_TAGS;
 
   const getValue = (r: any) => String(r[groupBy] ?? "-").trim();
 
@@ -259,8 +304,7 @@ const buildHeatmap = (rows: any[], groupBy: "curso" | "colegio" | "polo" = "cole
     const score = Number(row.score) || 0;
     if (score === 0) continue;
 
-    const tags: string[] = Array.isArray(row.tags) ? row.tags.map(canonTag) : ["General"];
-    for (const tag of tags) {
+    for (const tag of getRowThemeTags(row, projectThemes)) {
       if (!TAGS.includes(tag)) continue;
       if (!cells[group]) cells[group] = {};
       if (!cells[group][tag]) cells[group][tag] = { sum: 0, count: 0 };
@@ -509,15 +553,20 @@ function AdvancedAnalyticsInner() {
   const [encuestas, setEncuestas] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [keyword, setKeyword] = useState("");
+  const [projectThemes, setProjectThemes] = useState<ProjectTheme[]>([]);
 
   useEffect(() => {
     async function cargar() {
       if (!projectId) { setIsLoading(false); return; }
       setIsLoading(true);
       try {
-        const data = await obtenerEncuestasDB(projectId);
+        const [data, themesData] = await Promise.all([
+          obtenerEncuestasDB(projectId),
+          obtenerTemasProyectoDB(projectId).catch(() => []),
+        ]);
         const rows = Array.isArray(data) ? data : (data as any).rows || [];
         const procesado = normalizarDesdeDB(rows);
+        setProjectThemes(cleanProjectThemes(themesData));
         setEncuestas(procesado);
         const schools = Array.from(new Set(procesado.map((r: any) => r.colegio)))
           .filter((c) => c && c !== "Otros" && normalize(c) !== "todos los colegios")
@@ -531,6 +580,7 @@ function AdvancedAnalyticsInner() {
       } catch (e) {
         console.error(e);
         setEncuestas([]);
+        setProjectThemes([]);
       } finally {
         setIsLoading(false);
       }
@@ -547,6 +597,7 @@ function AdvancedAnalyticsInner() {
     };
     const isGlobal = activeSchool === "Todos los colegios";
     const fd = isGlobal ? encuestas : encuestas.filter((r) => matchSchool(String(r.colegio ?? ""), activeSchool));
+    const themeLabels = getThemeLabels(projectThemes);
 
     // NPS
     const promoters = fd.filter((r) => r.score >= 9).length;
@@ -576,12 +627,14 @@ function AdvancedAnalyticsInner() {
       .sort((a, b) => b.NPS - a.NPS);
 
     // ── RADAR y MATRIZ: usan fd (filtrado por colegio si aplica)
-    const tagMap: Record<string, number> = { Docencia: 0, Infraestructura: 0, Normativas: 0, Actividades: 0, "Comunicación": 0, General: 0 };
-    fd.forEach((r) => r.tags.forEach((t: string) => { if (tagMap[t] !== undefined) tagMap[t]++; }));
-    const radarData = Object.keys(tagMap).map((key) => ({ subject: key, A: tagMap[key] }));
+    const tagMap: Record<string, number> = Object.fromEntries(themeLabels.map((tag) => [tag, 0]));
+    fd.forEach((r) => getRowThemeTags(r, projectThemes).forEach((t: string) => {
+      if (tagMap[t] !== undefined) tagMap[t]++;
+    }));
+    const radarData = themeLabels.map((key) => ({ subject: key, A: tagMap[key] || 0 }));
 
     const matrixMap: Record<string, { sum: number; count: number }> = {};
-    fd.forEach((r) => r.tags.forEach((t: string) => {
+    fd.forEach((r) => getRowThemeTags(r, projectThemes).forEach((t: string) => {
       if (!matrixMap[t]) matrixMap[t] = { sum: 0, count: 0 };
       matrixMap[t].sum += r.score;
       matrixMap[t].count++;
@@ -643,16 +696,16 @@ function AdvancedAnalyticsInner() {
 
     // ✅ NUEVO: heatmap
     // Heatmap global: colegio × tema
-    const heatmap = buildHeatmap(encuestas, "colegio");
+    const heatmap = buildHeatmap(encuestas, "colegio", themeLabels, projectThemes);
 
     // Heatmap colegio: perfil (Promotor/Satisfecho/Insatisfecho) × tema
-    const heatmapByProfile = buildHeatmapByProfile(fd);
+    const heatmapByProfile = buildHeatmapByProfile(fd, themeLabels, projectThemes);
 
     // Stacked por tema: qué perfil tiene cada tema en el colegio seleccionado
     const stackedByTag: any[] = [];
-    const TAGS_LIST = ["Docencia","Infraestructura","Normativas","Actividades","Comunicación","General"];
+    const TAGS_LIST = themeLabels;
     TAGS_LIST.forEach((tag) => {
-      const tagRows = fd.filter((r: any) => r.tags.includes(tag));
+      const tagRows = fd.filter((r: any) => getRowThemeTags(r, projectThemes).includes(tag));
       if (!tagRows.length) return;
       stackedByTag.push({
         name: tag,
@@ -675,7 +728,7 @@ function AdvancedAnalyticsInner() {
 
     // Keyword
     const keywordCount = countKeywordInRows(fd, keyword);
-    const keywordByTagData = keywordByTag(fd, keyword).slice(0, 6);
+    const keywordByTagData = keywordByTag(fd, keyword, projectThemes).slice(0, 6);
 
     return {
       nps, avg, rankingData, radarData, matrixData, genderData, stackedData, stackedLabel, activeSchool,
@@ -686,7 +739,7 @@ function AdvancedAnalyticsInner() {
       keywordCount, keywordByTagData, promoters, insatisfechos,
       satisfechos: fd.filter((r) => r.score >= 7 && r.score <= 8).length,
     };
-  }, [encuestas, activeSchool, keyword]);
+  }, [encuestas, activeSchool, keyword, projectThemes]);
 
   if (!projectId) {
     return (

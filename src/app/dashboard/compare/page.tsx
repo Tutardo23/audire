@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, Suspense } from "react"; // ✅ Importamos Suspense
+import { useEffect, useMemo, useState, Suspense } from "react"; // ✅ Importamos Suspense
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import {
@@ -33,7 +33,7 @@ import {
   Legend,
   Cell,
 } from "recharts";
-import { listarProyectosDB, compararProyectosDB } from "../../actions";
+import { listarProyectosDB, compararProyectosDB, obtenerEncuestasDB } from "../../actions";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 type Project = { id: string; nombre: string; descripcion: string | null; creado_at: string };
@@ -50,6 +50,138 @@ type ProjectStats = {
   participationRate: number;
   topTags: { tag: string; count: number }[];
   bySchool: { colegio: string; avg: number; total: number; nps: number }[];
+};
+
+type SurveyRowLite = {
+  id?: string;
+  colegio?: string;
+  curso?: string;
+  polo?: string;
+  score?: number;
+  tags?: string[] | string | null;
+};
+
+type CompareMode = "proyectos" | "polos";
+
+const extractProjectYear = (name?: string | null) => {
+  const match = String(name ?? "").match(/\b(20\d{2})\b/);
+  return match ? match[1] : "";
+};
+
+const projectKindRank = (name?: string | null) => {
+  const n = normalizeText(String(name ?? ""));
+  if (n.includes("varon")) return 1;
+  if (n.includes("mujer")) return 2;
+  if (n.includes("jardin") || n.includes("jardín")) return 3;
+  return 9;
+};
+
+const projectKindLabel = (name?: string | null) => {
+  const n = normalizeText(String(name ?? ""));
+  if (n.includes("varon")) return "Varones";
+  if (n.includes("mujer")) return "Mujeres";
+  if (n.includes("jardin") || n.includes("jardín")) return "Jardines";
+  return "Proyecto";
+};
+
+
+const normalizeText = (value?: string | null) =>
+  String(value ?? "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+
+const parseTags = (raw: unknown): string[] => {
+  if (Array.isArray(raw)) return raw.map((tag) => String(tag).trim()).filter(Boolean);
+  if (typeof raw === "string") {
+    return raw
+      .replace(/[{}]/g, "")
+      .split(",")
+      .map((tag) => tag.trim())
+      .filter(Boolean);
+  }
+  return [];
+};
+
+const getSessionCache = <T,>(key: string): T | null => {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : null;
+  } catch {
+    return null;
+  }
+};
+
+const setSessionCache = (key: string, value: unknown) => {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Cache opcional. Si se llena o falla, no rompemos la página.
+  }
+};
+
+const calcStatsFromRows = (rows: SurveyRowLite[], projectId: string, nombre: string): ProjectStats => {
+  const validRows = rows.filter((row) => Number(row.score || 0) > 0);
+  const total = validRows.length;
+  const avg = total ? validRows.reduce((acc, row) => acc + Number(row.score || 0), 0) / total : 0;
+  const promoters = validRows.filter((row) => Number(row.score || 0) >= 9).length;
+  const passives = validRows.filter((row) => {
+    const score = Number(row.score || 0);
+    return score >= 7 && score <= 8;
+  }).length;
+  const detractors = validRows.filter((row) => {
+    const score = Number(row.score || 0);
+    return score > 0 && score <= 6;
+  }).length;
+  const nps = total ? Math.round(((promoters - detractors) / total) * 100) : 0;
+
+  const tagCount = new Map<string, number>();
+  validRows.forEach((row) => {
+    parseTags(row.tags).forEach((tag) => {
+      tagCount.set(tag, (tagCount.get(tag) || 0) + 1);
+    });
+  });
+
+  const schoolMap = new Map<string, { scores: number[]; total: number }>();
+  validRows.forEach((row) => {
+    const colegio = String(row.colegio || "Sin colegio");
+    const score = Number(row.score || 0);
+    const current = schoolMap.get(colegio) || { scores: [], total: 0 };
+    current.total += 1;
+    if (score > 0) current.scores.push(score);
+    schoolMap.set(colegio, current);
+  });
+
+  const bySchool = Array.from(schoolMap.entries())
+    .map(([colegio, data]) => {
+      const totalSchool = data.scores.length;
+      const schoolAvg = totalSchool ? data.scores.reduce((a, b) => a + b, 0) / totalSchool : 0;
+      const schoolPromoters = data.scores.filter((score) => score >= 9).length;
+      const schoolDetractors = data.scores.filter((score) => score > 0 && score <= 6).length;
+      const schoolNps = totalSchool ? Math.round(((schoolPromoters - schoolDetractors) / totalSchool) * 100) : 0;
+      return { colegio, avg: Number(schoolAvg.toFixed(2)), total: data.total, nps: schoolNps };
+    })
+    .sort((a, b) => b.total - a.total);
+
+  return {
+    projectId,
+    nombre,
+    total,
+    avg: Number(avg.toFixed(2)),
+    nps,
+    promoters,
+    passives,
+    detractors,
+    participationRate: 0,
+    topTags: Array.from(tagCount.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([tag, count]) => ({ tag, count })),
+    bySchool,
+  };
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -130,7 +262,7 @@ export default function ComparePage() {
 }
 
 // ─── Componente Principal ─────────────────────────────────────────────────────
-function CompareDashboardLive() { // ✅ Le cambiamos el nombre para que sea hijo del Suspense
+function CompareDashboardLive() {
   const searchParams = useSearchParams();
   const preA = searchParams.get("a") ?? "";
   const preB = searchParams.get("b") ?? "";
@@ -141,6 +273,17 @@ function CompareDashboardLive() { // ✅ Le cambiamos el nombre para que sea hij
   const [stats, setStats] = useState<{ a: ProjectStats; b: ProjectStats } | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingProjects, setLoadingProjects] = useState(true);
+  const [compareMode, setCompareMode] = useState<CompareMode>("proyectos");
+
+  // Comparación por polos: se hace por AÑO y agrupa los proyectos del mismo año
+  // (Varones + Mujeres + Jardines). Así un polo se compara contra otro polo completo.
+  const [selectedPoloYear, setSelectedPoloYear] = useState("");
+  const [poloRows, setPoloRows] = useState<SurveyRowLite[]>([]);
+  const [loadedPoloYear, setLoadedPoloYear] = useState("");
+  const [loadedYearProjectNames, setLoadedYearProjectNames] = useState<string[]>([]);
+  const [poloA, setPoloA] = useState("");
+  const [poloB, setPoloB] = useState("");
+  const [loadingPoloRows, setLoadingPoloRows] = useState(false);
 
   // Cargar lista de proyectos
   useEffect(() => {
@@ -160,6 +303,30 @@ function CompareDashboardLive() { // ✅ Le cambiamos el nombre para que sea hij
     if (preA && preB) handleCompare(preA, preB);
   }, []);
 
+  const yearOptions = useMemo(() => {
+    const years = Array.from(
+      new Set(projects.map((project) => extractProjectYear(project.nombre)).filter(Boolean))
+    );
+    return years.sort((a, b) => Number(b) - Number(a));
+  }, [projects]);
+
+  useEffect(() => {
+    if (selectedPoloYear || yearOptions.length === 0) return;
+    const preYear = extractProjectYear(projects.find((project) => project.id === preA)?.nombre || "");
+    setSelectedPoloYear(preYear || yearOptions[0]);
+  }, [preA, projects, selectedPoloYear, yearOptions]);
+
+  const projectsForYear = useMemo(() => {
+    if (!selectedPoloYear) return [] as Project[];
+    return projects
+      .filter((project) => extractProjectYear(project.nombre) === selectedPoloYear)
+      .sort((a, b) => {
+        const rank = projectKindRank(a.nombre) - projectKindRank(b.nombre);
+        if (rank !== 0) return rank;
+        return a.nombre.localeCompare(b.nombre);
+      });
+  }, [projects, selectedPoloYear]);
+
   const handleCompare = async (a = selectedA, b = selectedB) => {
     if (!a || !b || a === b) return;
     setLoading(true);
@@ -169,6 +336,125 @@ function CompareDashboardLive() { // ✅ Le cambiamos el nombre para que sea hij
       setStats(result as any);
     } catch (e) {
       alert("No se pudo obtener la comparación.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadRowsForProject = async (project: Project) => {
+    const cacheKey = `apdes:compare:rows:${project.id}`;
+    const cached = getSessionCache<SurveyRowLite[]>(cacheKey);
+    if (cached) return cached;
+
+    const data = await obtenerEncuestasDB(project.id);
+    const rows = (Array.isArray(data) ? data : ((data as any)?.rows || [])) as SurveyRowLite[];
+    setSessionCache(cacheKey, rows);
+    return rows;
+  };
+
+  const loadPoloRowsForYear = async (year = selectedPoloYear) => {
+    if (!year) return [] as SurveyRowLite[];
+
+    const yearProjects = projects
+      .filter((project) => extractProjectYear(project.nombre) === year)
+      .sort((a, b) => {
+        const rank = projectKindRank(a.nombre) - projectKindRank(b.nombre);
+        if (rank !== 0) return rank;
+        return a.nombre.localeCompare(b.nombre);
+      });
+
+    if (yearProjects.length === 0) {
+      setPoloRows([]);
+      setLoadedPoloYear(year);
+      setLoadedYearProjectNames([]);
+      return [] as SurveyRowLite[];
+    }
+
+    const cacheKey = `apdes:compare:polo-year:${year}:${yearProjects.map((project) => project.id).join(",")}`;
+    const cached = getSessionCache<SurveyRowLite[]>(cacheKey);
+    if (cached) {
+      setPoloRows(cached);
+      setLoadedPoloYear(year);
+      setLoadedYearProjectNames(yearProjects.map((project) => project.nombre));
+      return cached;
+    }
+
+    setLoadingPoloRows(true);
+    try {
+      // Como máximo debería leer Varones, Mujeres y Jardines del año elegido.
+      // Después todo se calcula en cliente y queda cacheado en sessionStorage.
+      const groupedRows = await Promise.all(
+        yearProjects.map(async (project) => {
+          const rows = await loadRowsForProject(project);
+          return rows.map((row) => ({
+            ...row,
+            // No se muestra, pero ayuda a distinguir internamente de dónde vino.
+            curso: row.curso,
+          }));
+        })
+      );
+
+      const rows = groupedRows.flat();
+      setPoloRows(rows);
+      setLoadedPoloYear(year);
+      setLoadedYearProjectNames(yearProjects.map((project) => project.nombre));
+      setSessionCache(cacheKey, rows);
+      return rows;
+    } catch {
+      alert("No se pudieron cargar los datos del año seleccionado.");
+      setPoloRows([]);
+      setLoadedPoloYear("");
+      setLoadedYearProjectNames([]);
+      return [] as SurveyRowLite[];
+    } finally {
+      setLoadingPoloRows(false);
+    }
+  };
+
+  const availablePolos = useMemo(() => {
+    return Array.from(
+      new Set(
+        poloRows
+          .map((row) => String(row.polo || "").trim())
+          .filter(Boolean)
+      )
+    ).sort((a, b) => a.localeCompare(b));
+  }, [poloRows]);
+
+  const handlePoloYearChange = async (year: string) => {
+    setSelectedPoloYear(year);
+    setPoloRows([]);
+    setLoadedPoloYear("");
+    setLoadedYearProjectNames([]);
+    setPoloA("");
+    setPoloB("");
+    setStats(null);
+
+    if (!year) return;
+    await loadPoloRowsForYear(year);
+  };
+
+  const handleComparePolos = async () => {
+    if (!selectedPoloYear || !poloA || !poloB || poloA === poloB) return;
+
+    setLoading(true);
+    setStats(null);
+
+    try {
+      const rows =
+        poloRows.length > 0 && loadedPoloYear === selectedPoloYear
+          ? poloRows
+          : await loadPoloRowsForYear(selectedPoloYear);
+
+      const rowsA = rows.filter((row) => normalizeText(row.polo) === normalizeText(poloA));
+      const rowsB = rows.filter((row) => normalizeText(row.polo) === normalizeText(poloB));
+
+      setStats({
+        a: calcStatsFromRows(rowsA, `polo-${selectedPoloYear}-a`, `${poloA} · Año ${selectedPoloYear}`),
+        b: calcStatsFromRows(rowsB, `polo-${selectedPoloYear}-b`, `${poloB} · Año ${selectedPoloYear}`),
+      });
+    } catch {
+      alert("No se pudo comparar los polos.");
     } finally {
       setLoading(false);
     }
@@ -196,7 +482,7 @@ function CompareDashboardLive() { // ✅ Le cambiamos el nombre para que sea hij
               <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-blue-100 text-blue-600">
                 <ArrowsLeftRight size={16} weight="bold" />
               </div>
-              <span className="font-black text-slate-900 tracking-tight">Comparar Proyectos</span>
+              <span className="font-black text-slate-900 tracking-tight">Comparador</span>
             </div>
           </div>
           <div className="flex items-center justify-center p-1 rounded-full border-2 border-blue-100 bg-white shadow-sm">
@@ -209,65 +495,204 @@ function CompareDashboardLive() { // ✅ Le cambiamos el nombre para que sea hij
 
         {/* Selector */}
         <div className="rounded-[32px] border border-white bg-white/60 backdrop-blur-xl shadow-lg shadow-slate-200/50 p-6 md:p-8">
-          <h2 className="font-display text-2xl font-black tracking-tight text-slate-900 mb-1">Seleccioná los proyectos</h2>
-          <p className="text-sm font-medium text-slate-500 mb-6">Elegí dos campañas o colegios para ver las diferencias lado a lado.</p>
-
-          <div className="grid grid-cols-1 md:grid-cols-[1fr_auto_1fr_auto] gap-4 items-end">
-            {/* Proyecto A */}
+          <div className="mb-6 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
             <div>
-              <label className="mb-2 block text-xs font-black uppercase tracking-widest text-blue-600">Proyecto A</label>
-              <select
-                value={selectedA}
-                onChange={(e) => setSelectedA(e.target.value)}
-                disabled={loadingProjects}
-                className="w-full rounded-2xl border-2 border-blue-100 bg-white px-4 py-3.5 text-sm font-bold text-slate-900 outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 transition-all appearance-none"
+              <h2 className="font-display text-2xl font-black tracking-tight text-slate-900 mb-1">
+                {compareMode === "proyectos" ? "Comparar proyectos" : "Comparar polos"}
+              </h2>
+              <p className="text-sm font-medium text-slate-500">
+                {compareMode === "proyectos"
+                  ? "Elegí dos campañas o colegios para ver las diferencias lado a lado."
+                  : "Elegí un año y compará polos completos agrupando Varones, Mujeres y Jardines."}
+              </p>
+            </div>
+
+            <div className="flex rounded-2xl border border-slate-200 bg-white p-1 shadow-sm">
+              <button
+                onClick={() => {
+                  setCompareMode("proyectos");
+                  setStats(null);
+                }}
+                className={`rounded-xl px-4 py-2 text-xs font-black uppercase tracking-widest transition-all ${
+                  compareMode === "proyectos" ? "bg-blue-600 text-white shadow-md" : "text-slate-500 hover:bg-slate-50"
+                }`}
               >
-                <option value="">— Elegí un proyecto —</option>
-                {projects.map((p) => (
-                  <option key={p.id} value={p.id} disabled={p.id === selectedB}>{p.nombre}</option>
-                ))}
-              </select>
-            </div>
-
-            {/* VS badge */}
-            <div className="flex items-center justify-center">
-              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-slate-100 text-slate-500 font-black text-sm">VS</div>
-            </div>
-
-            {/* Proyecto B */}
-            <div>
-              <label className="mb-2 block text-xs font-black uppercase tracking-widest text-indigo-600">Proyecto B</label>
-              <select
-                value={selectedB}
-                onChange={(e) => setSelectedB(e.target.value)}
-                disabled={loadingProjects}
-                className="w-full rounded-2xl border-2 border-indigo-100 bg-white px-4 py-3.5 text-sm font-bold text-slate-900 outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition-all appearance-none"
+                Proyectos
+              </button>
+              <button
+                onClick={() => {
+                  setCompareMode("polos");
+                  setStats(null);
+                }}
+                className={`rounded-xl px-4 py-2 text-xs font-black uppercase tracking-widest transition-all ${
+                  compareMode === "polos" ? "bg-indigo-600 text-white shadow-md" : "text-slate-500 hover:bg-slate-50"
+                }`}
               >
-                <option value="">— Elegí un proyecto —</option>
-                {projects.map((p) => (
-                  <option key={p.id} value={p.id} disabled={p.id === selectedA}>{p.nombre}</option>
-                ))}
-              </select>
+                Polos
+              </button>
             </div>
-
-            {/* Botón */}
-            <button
-              onClick={() => handleCompare()}
-              disabled={!selectedA || !selectedB || selectedA === selectedB || loading}
-              className="flex items-center justify-center gap-2 rounded-2xl bg-blue-600 px-6 py-3.5 text-sm font-black text-white transition-all hover:bg-blue-700 hover:shadow-lg hover:shadow-blue-600/25 active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              {loading ? (
-                <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
-              ) : (
-                <>Comparar <ArrowRight size={16} weight="bold" /></>
-              )}
-            </button>
           </div>
 
-          {selectedA && selectedA === selectedB && (
-            <p className="mt-3 flex items-center gap-1.5 text-xs font-bold text-amber-600">
-              <Warning size={14} weight="fill" /> Elegí dos proyectos distintos.
-            </p>
+          {compareMode === "proyectos" ? (
+            <>
+              <div className="grid grid-cols-1 md:grid-cols-[1fr_auto_1fr_auto] gap-4 items-end">
+                {/* Proyecto A */}
+                <div>
+                  <label className="mb-2 block text-xs font-black uppercase tracking-widest text-blue-600">Proyecto A</label>
+                  <select
+                    value={selectedA}
+                    onChange={(e) => setSelectedA(e.target.value)}
+                    disabled={loadingProjects}
+                    className="w-full rounded-2xl border-2 border-blue-100 bg-white px-4 py-3.5 text-sm font-bold text-slate-900 outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 transition-all appearance-none"
+                  >
+                    <option value="">— Elegí un proyecto —</option>
+                    {projects.map((p) => (
+                      <option key={p.id} value={p.id} disabled={p.id === selectedB}>{p.nombre}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* VS badge */}
+                <div className="flex items-center justify-center">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-full bg-slate-100 text-slate-500 font-black text-sm">VS</div>
+                </div>
+
+                {/* Proyecto B */}
+                <div>
+                  <label className="mb-2 block text-xs font-black uppercase tracking-widest text-indigo-600">Proyecto B</label>
+                  <select
+                    value={selectedB}
+                    onChange={(e) => setSelectedB(e.target.value)}
+                    disabled={loadingProjects}
+                    className="w-full rounded-2xl border-2 border-indigo-100 bg-white px-4 py-3.5 text-sm font-bold text-slate-900 outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition-all appearance-none"
+                  >
+                    <option value="">— Elegí un proyecto —</option>
+                    {projects.map((p) => (
+                      <option key={p.id} value={p.id} disabled={p.id === selectedA}>{p.nombre}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Botón */}
+                <button
+                  onClick={() => handleCompare()}
+                  disabled={!selectedA || !selectedB || selectedA === selectedB || loading}
+                  className="flex items-center justify-center gap-2 rounded-2xl bg-blue-600 px-6 py-3.5 text-sm font-black text-white transition-all hover:bg-blue-700 hover:shadow-lg hover:shadow-blue-600/25 active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {loading ? (
+                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                  ) : (
+                    <>Comparar <ArrowRight size={16} weight="bold" /></>
+                  )}
+                </button>
+              </div>
+
+              {selectedA && selectedA === selectedB && (
+                <p className="mt-3 flex items-center gap-1.5 text-xs font-bold text-amber-600">
+                  <Warning size={14} weight="fill" /> Elegí dos proyectos distintos.
+                </p>
+              )}
+            </>
+          ) : (
+            <>
+              <div className="grid grid-cols-1 lg:grid-cols-[0.8fr_1fr_1fr_auto] gap-4 items-end">
+                <div>
+                  <label className="mb-2 block text-xs font-black uppercase tracking-widest text-slate-600">Año</label>
+                  <select
+                    value={selectedPoloYear}
+                    onChange={(e) => handlePoloYearChange(e.target.value)}
+                    disabled={loadingProjects || loadingPoloRows}
+                    className="w-full rounded-2xl border-2 border-slate-100 bg-white px-4 py-3.5 text-sm font-bold text-slate-900 outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition-all appearance-none"
+                  >
+                    <option value="">— Elegí un año —</option>
+                    {yearOptions.map((year) => (
+                      <option key={year} value={year}>Año {year}</option>
+                    ))}
+                  </select>
+                  {loadingPoloRows && (
+                    <p className="mt-2 text-[11px] font-black uppercase tracking-widest text-indigo-500">Cargando proyectos del año...</p>
+                  )}
+                </div>
+
+                <div>
+                  <label className="mb-2 block text-xs font-black uppercase tracking-widest text-blue-600">Polo A</label>
+                  <select
+                    value={poloA}
+                    onFocus={() => {
+                      if (selectedPoloYear && loadedPoloYear !== selectedPoloYear && !loadingPoloRows) {
+                        loadPoloRowsForYear(selectedPoloYear);
+                      }
+                    }}
+                    onChange={(e) => setPoloA(e.target.value)}
+                    disabled={!selectedPoloYear || loadingPoloRows || availablePolos.length === 0}
+                    className="w-full rounded-2xl border-2 border-blue-100 bg-white px-4 py-3.5 text-sm font-bold text-slate-900 outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 transition-all appearance-none disabled:opacity-50"
+                  >
+                    <option value="">— Elegí un polo —</option>
+                    {availablePolos.map((polo) => (
+                      <option key={polo} value={polo} disabled={polo === poloB}>{polo}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="mb-2 block text-xs font-black uppercase tracking-widest text-indigo-600">Polo B</label>
+                  <select
+                    value={poloB}
+                    onFocus={() => {
+                      if (selectedPoloYear && loadedPoloYear !== selectedPoloYear && !loadingPoloRows) {
+                        loadPoloRowsForYear(selectedPoloYear);
+                      }
+                    }}
+                    onChange={(e) => setPoloB(e.target.value)}
+                    disabled={!selectedPoloYear || loadingPoloRows || availablePolos.length === 0}
+                    className="w-full rounded-2xl border-2 border-indigo-100 bg-white px-4 py-3.5 text-sm font-bold text-slate-900 outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition-all appearance-none disabled:opacity-50"
+                  >
+                    <option value="">— Elegí un polo —</option>
+                    {availablePolos.map((polo) => (
+                      <option key={polo} value={polo} disabled={polo === poloA}>{polo}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <button
+                  onClick={handleComparePolos}
+                  disabled={!selectedPoloYear || !poloA || !poloB || poloA === poloB || loading || loadingPoloRows}
+                  className="flex items-center justify-center gap-2 rounded-2xl bg-indigo-600 px-6 py-3.5 text-sm font-black text-white transition-all hover:bg-indigo-700 hover:shadow-lg hover:shadow-indigo-600/25 active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {loading ? (
+                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                  ) : (
+                    <>Comparar polos <ArrowRight size={16} weight="bold" /></>
+                  )}
+                </button>
+              </div>
+
+              {selectedPoloYear && !loadingPoloRows && projectsForYear.length === 0 && (
+                <p className="mt-3 flex items-center gap-1.5 text-xs font-bold text-amber-600">
+                  <Warning size={14} weight="fill" /> No encontré proyectos para el año seleccionado.
+                </p>
+              )}
+
+              {selectedPoloYear && !loadingPoloRows && loadedPoloYear === selectedPoloYear && availablePolos.length < 2 && (
+                <p className="mt-3 flex items-center gap-1.5 text-xs font-bold text-amber-600">
+                  <Warning size={14} weight="fill" /> Este año no tiene al menos dos polos para comparar.
+                </p>
+              )}
+
+              {selectedPoloYear && projectsForYear.length > 0 && (
+                <div className="mt-3 space-y-1">
+                  <p className="text-xs font-bold text-slate-400">
+                    Año seleccionado: <span className="text-slate-600">{selectedPoloYear}</span> · {projectsForYear.length} proyectos detectados.
+                  </p>
+                  <p className="text-[11px] font-bold text-slate-400">
+                    Se agrupan las respuestas del mismo año:{" "}
+                    <span className="text-slate-600">
+                      {(loadedYearProjectNames.length > 0 ? loadedYearProjectNames : projectsForYear.map((project) => project.nombre)).join(" · ")}
+                    </span>
+                  </p>
+                </div>
+              )}
+            </>
           )}
         </div>
 
@@ -276,7 +701,7 @@ function CompareDashboardLive() { // ✅ Le cambiamos el nombre para que sea hij
           <div className="flex h-64 w-full items-center justify-center rounded-[32px] border border-white bg-white/40 backdrop-blur-xl shadow-lg">
             <div className="flex flex-col items-center gap-4 text-blue-600">
               <DotsThreeCircle size={48} className="animate-pulse" weight="fill" />
-              <p className="text-sm font-bold text-slate-500 uppercase tracking-widest">Analizando proyectos...</p>
+              <p className="text-sm font-bold text-slate-500 uppercase tracking-widest">{compareMode === "polos" ? "Analizando polos..." : "Analizando proyectos..."}</p>
             </div>
           </div>
         )}
@@ -296,7 +721,7 @@ function CompareDashboardLive() { // ✅ Le cambiamos el nombre para que sea hij
                     <Folder size={20} weight="fill" />
                   </div>
                   <div>
-                    <p className={`text-xs font-black uppercase tracking-widest ${text} opacity-70`}>Proyecto {label}</p>
+                    <p className={`text-xs font-black uppercase tracking-widest ${text} opacity-70`}>{compareMode === "polos" ? "Polo" : "Proyecto"} {label}</p>
                     <p className={`font-display text-lg font-black tracking-tight ${text}`}>{s.nombre}</p>
                   </div>
                 </div>
@@ -429,7 +854,7 @@ function CompareDashboardLive() { // ✅ Le cambiamos el nombre para que sea hij
             {(stats.a.bySchool.length > 0 || stats.b.bySchool.length > 0) && (
               <div className="rounded-[28px] border border-white bg-white/60 backdrop-blur-xl shadow-lg shadow-slate-200/50 p-6">
                 <h3 className="font-display text-lg font-black tracking-tight text-slate-900 mb-1">Promedio por colegio</h3>
-                <p className="text-xs font-medium text-slate-400 mb-5">Rendimiento de cada sede en ambos proyectos</p>
+                <p className="text-xs font-medium text-slate-400 mb-5">{compareMode === "polos" ? "Colegios incluidos dentro de cada polo." : "Rendimiento de cada sede en ambos proyectos."}</p>
                 <div className="overflow-x-auto">
                   <table className="w-full text-sm">
                     <thead>
