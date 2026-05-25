@@ -3065,3 +3065,160 @@ export async function obtenerFamiliasCompartidasProyectoDB(projectId: string, se
   setSharedFamiliesCache(sharedFamiliesCacheKey, result);
   return result;
 }
+
+// --------------------
+// ACCESS LOGS LIVIANOS
+// --------------------
+async function ensureAccessLogsTable() {
+  // Tabla mínima + columnas agregadas de forma segura.
+  // No usamos project_name como columna para no romper si la tabla vieja existe distinta.
+  await sql`
+    CREATE TABLE IF NOT EXISTS access_logs (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      action text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )
+  `;
+
+  await sql`ALTER TABLE access_logs ADD COLUMN IF NOT EXISTS user_id text`;
+  await sql`ALTER TABLE access_logs ADD COLUMN IF NOT EXISTS email text`;
+  await sql`ALTER TABLE access_logs ADD COLUMN IF NOT EXISTS role text`;
+  await sql`ALTER TABLE access_logs ADD COLUMN IF NOT EXISTS project_id uuid`;
+  await sql`ALTER TABLE access_logs ADD COLUMN IF NOT EXISTS colegio text`;
+  await sql`ALTER TABLE access_logs ADD COLUMN IF NOT EXISTS polo text`;
+  await sql`ALTER TABLE access_logs ADD COLUMN IF NOT EXISTS vista text`;
+  await sql`ALTER TABLE access_logs ADD COLUMN IF NOT EXISTS metadata jsonb NOT NULL DEFAULT '{}'::jsonb`;
+
+  await sql`
+    CREATE INDEX IF NOT EXISTS idx_access_logs_created_at
+    ON access_logs(created_at DESC)
+  `;
+
+  await sql`
+    CREATE INDEX IF NOT EXISTS idx_access_logs_project_created
+    ON access_logs(project_id, created_at DESC)
+  `;
+
+  await sql`
+    CREATE INDEX IF NOT EXISTS idx_access_logs_user_created
+    ON access_logs(user_id, created_at DESC)
+  `;
+}
+
+type AccessLogAction =
+  | "dashboard_open"
+  | "project_open"
+  | "project_create"
+  | "project_rename"
+  | "project_delete"
+  | "download_excel"
+  | "family_import"
+  | "family_confirm_import"
+  | "themes_update"
+  | "team_config_update";
+
+const AccessLogInputSchema = z.object({
+  action: z.string().min(1).max(80),
+  projectId: z.string().uuid().optional().or(z.literal("")),
+  projectName: z.string().max(180).optional(),
+  vista: z.string().max(80).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+});
+
+export async function registrarAccessLogDB(inputUnsafe: unknown) {
+  const userId = await requireUserId();
+  const input = AccessLogInputSchema.parse(inputUnsafe);
+  const scope = await getAccessScope();
+  const user = await currentUser();
+  const email = user?.emailAddresses?.[0]?.emailAddress ?? "";
+
+  const projectId = input.projectId && UUIDSchema.safeParse(input.projectId).success ? input.projectId : "";
+  let projectName = String(input.projectName || "").trim();
+
+  if (projectId) {
+    await assertProjectAccess(projectId, userId, scope);
+    if (!projectName) {
+      const projectRows = await sql`
+        SELECT nombre
+        FROM projects
+        WHERE id = ${projectId}::uuid
+        LIMIT 1
+      `;
+      projectName = String((projectRows as any[])?.[0]?.nombre || "");
+    }
+  }
+
+  await ensureAccessLogsTable();
+
+  await sql`
+    INSERT INTO access_logs (
+      user_id,
+      email,
+      role,
+      project_id,
+      colegio,
+      polo,
+      vista,
+      action,
+      metadata
+    ) VALUES (
+      ${userId},
+      ${email || null},
+      ${String(scope.role || "") || null},
+      ${projectId || null}::uuid,
+      ${scope.colegio || null},
+      ${scope.polo || null},
+      ${String(input.vista || "") || null},
+      ${String(input.action) as AccessLogAction},
+      ${JSON.stringify({ ...(input.metadata || {}), projectName })}::jsonb
+    )
+  `;
+
+  return { ok: true };
+}
+
+export async function listarAccessLogsDB(inputUnsafe?: unknown) {
+  await requireAdmin();
+  await ensureAccessLogsTable();
+
+  const parsed = z
+    .object({
+      limit: z.coerce.number().int().min(1).max(100).default(80),
+      projectId: z.string().uuid().optional().or(z.literal("")),
+      userId: z.string().max(120).optional(),
+      action: z.string().max(80).optional(),
+    })
+    .default({ limit: 80 })
+    .parse(inputUnsafe ?? {});
+
+  const projectId = parsed.projectId && UUIDSchema.safeParse(parsed.projectId).success ? parsed.projectId : "";
+  const userId = String(parsed.userId || "").trim();
+  const action = String(parsed.action || "").trim();
+
+  const rows = await sql`
+    SELECT
+      id::text,
+      user_id,
+      email,
+      role,
+      project_id::text,
+      colegio,
+      polo,
+      vista,
+      action,
+      metadata,
+      created_at
+    FROM access_logs
+    WHERE (${!projectId} OR project_id = ${projectId || "00000000-0000-0000-0000-000000000000"}::uuid)
+      AND (${!userId} OR user_id = ${userId})
+      AND (${!action} OR action = ${action})
+    ORDER BY created_at DESC
+    LIMIT ${parsed.limit}
+  `;
+
+  return (rows as any[]).map((row) => ({
+    ...row,
+    project_name: row?.metadata?.projectName || "",
+    created_at: row.created_at ? new Date(row.created_at).toISOString() : "",
+  }));
+}
