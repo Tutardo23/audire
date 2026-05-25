@@ -927,7 +927,7 @@ export default function DashboardHubPage() {
               </div>
             </div>
             <p className="mt-3 text-[11px] font-bold text-slate-400">
-              Para ahorrar Neon, se leen solo los últimos 80 registros y las
+              Se leen solo los últimos 80 registros y las
               entradas a proyectos se guardan una vez por sesión.
             </p>
           </div>
