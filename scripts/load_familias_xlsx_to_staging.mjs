@@ -100,7 +100,7 @@ if (!ALLOWED_EXTENSIONS.has(fileExtension(file))) {
 }
 
 const maxFileSizeMB = Number(process.env.FAMILIAS_MAX_FILE_MB || 30);
-const keepRawPayload = String(process.env.FAMILIAS_KEEP_RAW_PAYLOAD || "true").toLowerCase() !== "false";
+const keepRawPayload = String(process.env.FAMILIAS_KEEP_RAW_PAYLOAD || "false").toLowerCase() === "true";
 if (!Number.isFinite(maxFileSizeMB) || maxFileSizeMB <= 0) {
   console.error("FAMILIAS_MAX_FILE_MB inválido.");
   process.exit(1);
