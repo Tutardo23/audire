@@ -134,6 +134,551 @@ const normalizeSchoolForCompare = (value?: string | null) => {
   return normalized;
 };
 
+
+type StaticFamilyDistributionRow = {
+  label: string;
+  familias: number;
+};
+
+type StaticFamilyDistribution = {
+  titleSchool: string;
+  polo: string;
+  year: number;
+  total: number;
+  rows: StaticFamilyDistributionRow[];
+};
+
+const STATIC_2025_FAMILY_DISTRIBUTIONS: Record<string, StaticFamilyDistribution> = {
+  [normalizeSchoolForCompare("Colegio Pucará")]: {
+    titleSchool: "Pucará",
+    polo: "Tucumán",
+    year: 2025,
+    total: 519,
+    rows: [
+      { label: "Colegio Pucará", familias: 238 },
+      { label: "Colegio Pucará + Colegio Los Cerros", familias: 212 },
+      { label: "Colegio Pucará + Jardín Los Cerritos", familias: 41 },
+      { label: "Colegio Pucará + Colegio Los Cerros + Jardín Los Cerritos", familias: 28 },
+    ],
+  },
+  [normalizeSchoolForCompare("Colegio Los Cerros")]: {
+    titleSchool: "Los Cerros",
+    polo: "Tucumán",
+    year: 2025,
+    total: 552,
+    rows: [
+      { label: "Colegio Los Cerros", familias: 263 },
+      { label: "Colegio Los Cerros + Colegio Pucará", familias: 212 },
+      { label: "Colegio Los Cerros + Jardín Los Cerritos", familias: 49 },
+      { label: "Colegio Los Cerros + Colegio Pucará + Jardín Los Cerritos", familias: 28 },
+    ],
+  },
+  [normalizeSchoolForCompare("Jardín Los Cerritos")]: {
+    titleSchool: "Jardín Los Cerritos",
+    polo: "Tucumán",
+    year: 2025,
+    total: 264,
+    rows: [
+      { label: "Jardín Los Cerritos", familias: 146 },
+      { label: "Jardín Los Cerritos + Colegio Pucará", familias: 41 },
+      { label: "Jardín Los Cerritos + Colegio Los Cerros", familias: 49 },
+      { label: "Jardín Los Cerritos + Colegio Pucará + Colegio Los Cerros", familias: 28 },
+    ],
+  },
+  [normalizeSchoolForCompare("Colegio Cinco Ríos")]: {
+    titleSchool: "Cinco Ríos",
+    polo: "Córdoba",
+    year: 2025,
+    total: 352,
+    rows: [
+      { label: "Colegio Cinco Ríos", familias: 157 },
+      { label: "Colegio Cinco Ríos + Colegio El Torreón", familias: 147 },
+      { label: "Colegio Cinco Ríos + Jardín Torreón de los Ríos", familias: 27 },
+      { label: "Colegio Cinco Ríos + Colegio El Torreón + Jardín Torreón de los Ríos", familias: 21 },
+    ],
+  },
+  [normalizeSchoolForCompare("Colegio El Torreón")]: {
+    titleSchool: "El Torreón",
+    polo: "Córdoba",
+    year: 2025,
+    total: 395,
+    rows: [
+      { label: "Colegio El Torreón", familias: 185 },
+      { label: "Colegio El Torreón + Colegio Cinco Ríos", familias: 147 },
+      { label: "Colegio El Torreón + Jardín Torreón de los Ríos", familias: 42 },
+      { label: "Colegio El Torreón + Colegio Cinco Ríos + Jardín Torreón de los Ríos", familias: 21 },
+    ],
+  },
+  [normalizeSchoolForCompare("Jardín Torreón de los Ríos")]: {
+    titleSchool: "Jardín Torreón de los Ríos",
+    polo: "Córdoba",
+    year: 2025,
+    total: 192,
+    rows: [
+      { label: "Jardín Torreón de los Ríos", familias: 102 },
+      { label: "Jardín Torreón de los Ríos + Colegio Cinco Ríos", familias: 27 },
+      { label: "Jardín Torreón de los Ríos + Colegio El Torreón", familias: 42 },
+      { label: "Jardín Torreón de los Ríos + Colegio Cinco Ríos + Colegio El Torreón", familias: 21 },
+    ],
+  },
+  [normalizeSchoolForCompare("Colegio Los Arroyos")]: {
+    titleSchool: "Los Arroyos",
+    polo: "Rosario",
+    year: 2025,
+    total: 267,
+    rows: [
+      { label: "Colegio Los Arroyos", familias: 115 },
+      { label: "Colegio Los Arroyos + Colegio Mirasoles", familias: 101 },
+      { label: "Colegio Los Arroyos + Jardín Los Senderos", familias: 29 },
+      { label: "Colegio Los Arroyos + Colegio Mirasoles + Jardín Los Senderos", familias: 22 },
+    ],
+  },
+  [normalizeSchoolForCompare("Colegio Mirasoles")]: {
+    titleSchool: "Mirasoles",
+    polo: "Rosario",
+    year: 2025,
+    total: 282,
+    rows: [
+      { label: "Colegio Mirasoles", familias: 122 },
+      { label: "Colegio Mirasoles + Colegio Los Arroyos", familias: 101 },
+      { label: "Colegio Mirasoles + Jardín Los Senderos", familias: 37 },
+      { label: "Colegio Mirasoles + Colegio Los Arroyos + Jardín Los Senderos", familias: 22 },
+    ],
+  },
+  [normalizeSchoolForCompare("Jardín Los Senderos")]: {
+    titleSchool: "Jardín Los Senderos",
+    polo: "Rosario",
+    year: 2025,
+    total: 190,
+    rows: [
+      { label: "Jardín Los Senderos", familias: 102 },
+      { label: "Jardín Los Senderos + Colegio Los Arroyos", familias: 29 },
+      { label: "Jardín Los Senderos + Colegio Mirasoles", familias: 37 },
+      { label: "Jardín Los Senderos + Colegio Los Arroyos + Colegio Mirasoles", familias: 22 },
+    ],
+  },
+  [normalizeSchoolForCompare("Colegio Los Molinos")]: {
+    titleSchool: "Los Molinos",
+    polo: "Buenos Aires",
+    year: 2025,
+    total: 544,
+    rows: [
+      { label: "Colegio Los Molinos", familias: 285 },
+      { label: "Colegio Los Molinos + Colegio El Buen Ayre", familias: 182 },
+      { label: "Colegio Los Molinos + Jardín Buen Molino", familias: 19 },
+      { label: "Colegio Los Molinos + Colegio El Buen Ayre + Jardín Buen Molino", familias: 58 },
+    ],
+  },
+  [normalizeSchoolForCompare("Colegio El Buen Ayre")]: {
+    titleSchool: "El Buen Ayre",
+    polo: "Buenos Aires",
+    year: 2025,
+    total: 439,
+    rows: [
+      { label: "Colegio El Buen Ayre", familias: 158 },
+      { label: "Colegio El Buen Ayre + Colegio Los Molinos", familias: 182 },
+      { label: "Colegio El Buen Ayre + Jardín Buen Molino", familias: 41 },
+      { label: "Colegio El Buen Ayre + Colegio Los Molinos + Jardín Buen Molino", familias: 58 },
+    ],
+  },
+  [normalizeSchoolForCompare("Jardín Buen Molino")]: {
+    titleSchool: "Jardín Buen Molino",
+    polo: "Buenos Aires",
+    year: 2025,
+    total: 162,
+    rows: [
+      { label: "Jardín Buen Molino", familias: 44 },
+      { label: "Jardín Buen Molino + Colegio Los Molinos", familias: 19 },
+      { label: "Jardín Buen Molino + Colegio El Buen Ayre", familias: 41 },
+      { label: "Jardín Buen Molino + Colegio Los Molinos + Colegio El Buen Ayre", familias: 58 },
+    ],
+  },
+  [normalizeSchoolForCompare("Colegio Los Olivos")]: {
+    titleSchool: "Los Olivos",
+    polo: "Mendoza",
+    year: 2025,
+    total: 262,
+    rows: [
+      { label: "Colegio Los Olivos", familias: 140 },
+      { label: "Colegio Los Olivos + Colegio Portezuelo", familias: 74 },
+      { label: "Colegio Los Olivos + Jardín Platero", familias: 31 },
+      { label: "Colegio Los Olivos + Colegio Portezuelo + Jardín Platero", familias: 17 },
+    ],
+  },
+  [normalizeSchoolForCompare("Colegio Portezuelo")]: {
+    titleSchool: "Portezuelo",
+    polo: "Mendoza",
+    year: 2025,
+    total: 283,
+    rows: [
+      { label: "Colegio Portezuelo", familias: 156 },
+      { label: "Colegio Portezuelo + Colegio Los Olivos", familias: 74 },
+      { label: "Colegio Portezuelo + Jardín Platero", familias: 36 },
+      { label: "Colegio Portezuelo + Colegio Los Olivos + Jardín Platero", familias: 17 },
+    ],
+  },
+  [normalizeSchoolForCompare("Jardín Platero")]: {
+    titleSchool: "Jardín Platero",
+    polo: "Mendoza",
+    year: 2025,
+    total: 181,
+    rows: [
+      { label: "Jardín Platero", familias: 97 },
+      { label: "Jardín Platero + Colegio Los Olivos", familias: 31 },
+      { label: "Jardín Platero + Colegio Portezuelo", familias: 36 },
+      { label: "Jardín Platero + Colegio Los Olivos + Colegio Portezuelo", familias: 17 },
+    ],
+  },
+  [normalizeSchoolForCompare("Bosque Del Plata")]: {
+    titleSchool: "Bosque Del Plata",
+    polo: "La Plata",
+    year: 2025,
+    total: 253,
+    rows: [
+      { label: "Bosque Del Plata", familias: 177 },
+      { label: "Bosque Del Plata + Colegio Crisol", familias: 39 },
+      { label: "Bosque Del Plata + Jardín Crisol", familias: 23 },
+      { label: "Bosque Del Plata + Colegio Crisol + Jardín Crisol", familias: 14 },
+    ],
+  },
+  [normalizeSchoolForCompare("Colegio Crisol")]: {
+    titleSchool: "Crisol",
+    polo: "La Plata",
+    year: 2025,
+    total: 128,
+    rows: [
+      { label: "Colegio Crisol", familias: 44 },
+      { label: "Colegio Crisol + Bosque Del Plata", familias: 39 },
+      { label: "Colegio Crisol + Jardín Crisol", familias: 31 },
+      { label: "Colegio Crisol + Bosque Del Plata + Jardín Crisol", familias: 14 },
+    ],
+  },
+  [normalizeSchoolForCompare("Jardín Crisol")]: {
+    titleSchool: "Jardín Crisol",
+    polo: "La Plata",
+    year: 2025,
+    total: 140,
+    rows: [
+      { label: "Jardín Crisol", familias: 72 },
+      { label: "Jardín Crisol + Bosque Del Plata", familias: 23 },
+      { label: "Jardín Crisol + Colegio Crisol", familias: 31 },
+      { label: "Jardín Crisol + Bosque Del Plata + Colegio Crisol", familias: 14 },
+    ],
+  },
+  [normalizeSchoolForCompare("Colegio Los Caminos")]: {
+    titleSchool: "Los Caminos",
+    polo: "Pilar",
+    year: 2025,
+    total: 131,
+    rows: [
+      { label: "Colegio Los Caminos", familias: 59 },
+      { label: "Colegio Los Caminos + Los Candiles", familias: 38 },
+      { label: "Colegio Los Caminos + Jardín Cauquén", familias: 16 },
+      { label: "Colegio Los Caminos + Los Candiles + Jardín Cauquén", familias: 18 },
+    ],
+  },
+  [normalizeSchoolForCompare("Los Candiles")]: {
+    titleSchool: "Los Candiles",
+    polo: "Pilar",
+    year: 2025,
+    total: 119,
+    rows: [
+      { label: "Los Candiles", familias: 46 },
+      { label: "Los Candiles + Colegio Los Caminos", familias: 38 },
+      { label: "Los Candiles + Jardín Cauquén", familias: 17 },
+      { label: "Los Candiles + Colegio Los Caminos + Jardín Cauquén", familias: 18 },
+    ],
+  },
+  [normalizeSchoolForCompare("Jardín Cauquén")]: {
+    titleSchool: "Jardín Cauquén",
+    polo: "Pilar",
+    year: 2025,
+    total: 98,
+    rows: [
+      { label: "Jardín Cauquén", familias: 47 },
+      { label: "Jardín Cauquén + Colegio Los Caminos", familias: 16 },
+      { label: "Jardín Cauquén + Los Candiles", familias: 17 },
+      { label: "Jardín Cauquén + Colegio Los Caminos + Los Candiles", familias: 18 },
+    ],
+  },
+};
+
+const STATIC_2024_FAMILY_DISTRIBUTIONS: Record<string, StaticFamilyDistribution> = {
+  [normalizeSchoolForCompare("Colegio Pucará")]: {
+    titleSchool: "Pucará",
+    polo: "Tucumán",
+    year: 2024,
+    total: 488,
+    rows: [
+      { label: "Colegio Pucará", familias: 219 },
+      { label: "Colegio Pucará + Colegio Los Cerros", familias: 191 },
+      { label: "Colegio Pucará + Jardín Los Cerritos", familias: 49 },
+      { label: "Colegio Pucará + Colegio Los Cerros + Jardín Los Cerritos", familias: 29 },
+    ],
+  },
+  [normalizeSchoolForCompare("Colegio Los Cerros")]: {
+    titleSchool: "Los Cerros",
+    polo: "Tucumán",
+    year: 2024,
+    total: 531,
+    rows: [
+      { label: "Colegio Los Cerros", familias: 253 },
+      { label: "Colegio Los Cerros + Colegio Pucará", familias: 191 },
+      { label: "Colegio Los Cerros + Jardín Los Cerritos", familias: 58 },
+      { label: "Colegio Los Cerros + Colegio Pucará + Jardín Los Cerritos", familias: 29 },
+    ],
+  },
+  [normalizeSchoolForCompare("Jardín Los Cerritos")]: {
+    titleSchool: "Jardín Los Cerritos",
+    polo: "Tucumán",
+    year: 2024,
+    total: 288,
+    rows: [
+      { label: "Jardín Los Cerritos", familias: 152 },
+      { label: "Jardín Los Cerritos + Colegio Pucará", familias: 49 },
+      { label: "Jardín Los Cerritos + Colegio Los Cerros", familias: 58 },
+      { label: "Jardín Los Cerritos + Colegio Pucará + Colegio Los Cerros", familias: 29 },
+    ],
+  },
+  [normalizeSchoolForCompare("Colegio Cinco Ríos")]: {
+    titleSchool: "Cinco Ríos",
+    polo: "Córdoba",
+    year: 2024,
+    total: 332,
+    rows: [
+      { label: "Colegio Cinco Ríos", familias: 147 },
+      { label: "Colegio Cinco Ríos + Colegio El Torreón", familias: 133 },
+      { label: "Colegio Cinco Ríos + Jardín Torreón de los Ríos", familias: 29 },
+      { label: "Colegio Cinco Ríos + Colegio El Torreón + Jardín Torreón de los Ríos", familias: 23 },
+    ],
+  },
+  [normalizeSchoolForCompare("Colegio El Torreón")]: {
+    titleSchool: "El Torreón",
+    polo: "Córdoba",
+    year: 2024,
+    total: 382,
+    rows: [
+      { label: "Colegio El Torreón", familias: 178 },
+      { label: "Colegio El Torreón + Colegio Cinco Ríos", familias: 133 },
+      { label: "Colegio El Torreón + Jardín Torreón de los Ríos", familias: 48 },
+      { label: "Colegio El Torreón + Colegio Cinco Ríos + Jardín Torreón de los Ríos", familias: 23 },
+    ],
+  },
+  [normalizeSchoolForCompare("Jardín Torreón de los Ríos")]: {
+    titleSchool: "Jardín Torreón de los Ríos",
+    polo: "Córdoba",
+    year: 2024,
+    total: 206,
+    rows: [
+      { label: "Jardín Torreón de los Ríos", familias: 106 },
+      { label: "Jardín Torreón de los Ríos + Colegio Cinco Ríos", familias: 29 },
+      { label: "Jardín Torreón de los Ríos + Colegio El Torreón", familias: 48 },
+      { label: "Jardín Torreón de los Ríos + Colegio Cinco Ríos + Colegio El Torreón", familias: 23 },
+    ],
+  },
+  [normalizeSchoolForCompare("Colegio Los Arroyos")]: {
+    titleSchool: "Los Arroyos",
+    polo: "Rosario",
+    year: 2024,
+    total: 258,
+    rows: [
+      { label: "Colegio Los Arroyos", familias: 106 },
+      { label: "Colegio Los Arroyos + Colegio Mirasoles", familias: 102 },
+      { label: "Colegio Los Arroyos + Jardín Los Senderos", familias: 33 },
+      { label: "Colegio Los Arroyos + Colegio Mirasoles + Jardín Los Senderos", familias: 17 },
+    ],
+  },
+  [normalizeSchoolForCompare("Colegio Mirasoles")]: {
+    titleSchool: "Mirasoles",
+    polo: "Rosario",
+    year: 2024,
+    total: 279,
+    rows: [
+      { label: "Colegio Mirasoles", familias: 123 },
+      { label: "Colegio Mirasoles + Colegio Los Arroyos", familias: 102 },
+      { label: "Colegio Mirasoles + Jardín Los Senderos", familias: 37 },
+      { label: "Colegio Mirasoles + Colegio Los Arroyos + Jardín Los Senderos", familias: 17 },
+    ],
+  },
+  [normalizeSchoolForCompare("Jardín Los Senderos")]: {
+    titleSchool: "Jardín Los Senderos",
+    polo: "Rosario",
+    year: 2024,
+    total: 175,
+    rows: [
+      { label: "Jardín Los Senderos", familias: 88 },
+      { label: "Jardín Los Senderos + Colegio Los Arroyos", familias: 33 },
+      { label: "Jardín Los Senderos + Colegio Mirasoles", familias: 37 },
+      { label: "Jardín Los Senderos + Colegio Los Arroyos + Colegio Mirasoles", familias: 17 },
+    ],
+  },
+  [normalizeSchoolForCompare("Colegio Los Molinos")]: {
+    titleSchool: "Los Molinos",
+    polo: "Buenos Aires",
+    year: 2024,
+    total: 560,
+    rows: [
+      { label: "Colegio Los Molinos", familias: 292 },
+      { label: "Colegio Los Molinos + Colegio El Buen Ayre", familias: 190 },
+      { label: "Colegio Los Molinos + Jardín Buen Molino", familias: 20 },
+      { label: "Colegio Los Molinos + Colegio El Buen Ayre + Jardín Buen Molino", familias: 58 },
+    ],
+  },
+  [normalizeSchoolForCompare("Colegio El Buen Ayre")]: {
+    titleSchool: "El Buen Ayre",
+    polo: "Buenos Aires",
+    year: 2024,
+    total: 441,
+    rows: [
+      { label: "Colegio El Buen Ayre", familias: 158 },
+      { label: "Colegio El Buen Ayre + Colegio Los Molinos", familias: 190 },
+      { label: "Colegio El Buen Ayre + Jardín Buen Molino", familias: 35 },
+      { label: "Colegio El Buen Ayre + Colegio Los Molinos + Jardín Buen Molino", familias: 58 },
+    ],
+  },
+  [normalizeSchoolForCompare("Jardín Buen Molino")]: {
+    titleSchool: "Jardín Buen Molino",
+    polo: "Buenos Aires",
+    year: 2024,
+    total: 168,
+    rows: [
+      { label: "Jardín Buen Molino", familias: 55 },
+      { label: "Jardín Buen Molino + Colegio Los Molinos", familias: 20 },
+      { label: "Jardín Buen Molino + Colegio El Buen Ayre", familias: 35 },
+      { label: "Jardín Buen Molino + Colegio Los Molinos + Colegio El Buen Ayre", familias: 58 },
+    ],
+  },
+  [normalizeSchoolForCompare("Colegio Los Olivos")]: {
+    titleSchool: "Los Olivos",
+    polo: "Mendoza",
+    year: 2024,
+    total: 250,
+    rows: [
+      { label: "Colegio Los Olivos", familias: 132 },
+      { label: "Colegio Los Olivos + Colegio Portezuelo", familias: 70 },
+      { label: "Colegio Los Olivos + Jardín Platero", familias: 26 },
+      { label: "Colegio Los Olivos + Colegio Portezuelo + Jardín Platero", familias: 22 },
+    ],
+  },
+  [normalizeSchoolForCompare("Colegio Portezuelo")]: {
+    titleSchool: "Portezuelo",
+    polo: "Mendoza",
+    year: 2024,
+    total: 215,
+    rows: [
+      { label: "Colegio Portezuelo", familias: 97 },
+      { label: "Colegio Portezuelo + Colegio Los Olivos", familias: 70 },
+      { label: "Colegio Portezuelo + Jardín Platero", familias: 26 },
+      { label: "Colegio Portezuelo + Colegio Los Olivos + Jardín Platero", familias: 22 },
+    ],
+  },
+  [normalizeSchoolForCompare("Jardín Platero")]: {
+    titleSchool: "Jardín Platero",
+    polo: "Mendoza",
+    year: 2024,
+    total: 171,
+    rows: [
+      { label: "Jardín Platero", familias: 97 },
+      { label: "Jardín Platero + Colegio Los Olivos", familias: 26 },
+      { label: "Jardín Platero + Colegio Portezuelo", familias: 26 },
+      { label: "Jardín Platero + Colegio Los Olivos + Colegio Portezuelo", familias: 22 },
+    ],
+  },
+  [normalizeSchoolForCompare("Bosque Del Plata")]: {
+    titleSchool: "Bosque Del Plata",
+    polo: "La Plata",
+    year: 2024,
+    total: 232,
+    rows: [
+      { label: "Bosque Del Plata", familias: 120 },
+      { label: "Bosque Del Plata + Colegio Crisol", familias: 73 },
+      { label: "Bosque Del Plata + Jardín Crisol", familias: 27 },
+      { label: "Bosque Del Plata + Colegio Crisol + Jardín Crisol", familias: 12 },
+    ],
+  },
+  [normalizeSchoolForCompare("Colegio Crisol")]: {
+    titleSchool: "Crisol",
+    polo: "La Plata",
+    year: 2024,
+    total: 224,
+    rows: [
+      { label: "Colegio Crisol", familias: 107 },
+      { label: "Colegio Crisol + Bosque Del Plata", familias: 73 },
+      { label: "Colegio Crisol + Jardín Crisol", familias: 32 },
+      { label: "Colegio Crisol + Bosque Del Plata + Jardín Crisol", familias: 12 },
+    ],
+  },
+  [normalizeSchoolForCompare("Jardín Crisol")]: {
+    titleSchool: "Jardín Crisol",
+    polo: "La Plata",
+    year: 2024,
+    total: 150,
+    rows: [
+      { label: "Jardín Crisol", familias: 79 },
+      { label: "Jardín Crisol + Bosque Del Plata", familias: 27 },
+      { label: "Jardín Crisol + Colegio Crisol", familias: 32 },
+      { label: "Jardín Crisol + Bosque Del Plata + Colegio Crisol", familias: 12 },
+    ],
+  },
+  [normalizeSchoolForCompare("Colegio Los Caminos")]: {
+    titleSchool: "Los Caminos",
+    polo: "Pilar",
+    year: 2024,
+    total: 108,
+    rows: [
+      { label: "Colegio Los Caminos", familias: 44 },
+      { label: "Colegio Los Caminos + Los Candiles", familias: 29 },
+      { label: "Colegio Los Caminos + Jardín Cauquén", familias: 16 },
+      { label: "Colegio Los Caminos + Los Candiles + Jardín Cauquén", familias: 19 },
+    ],
+  },
+  [normalizeSchoolForCompare("Los Candiles")]: {
+    titleSchool: "Los Candiles",
+    polo: "Pilar",
+    year: 2024,
+    total: 106,
+    rows: [
+      { label: "Los Candiles", familias: 37 },
+      { label: "Los Candiles + Colegio Los Caminos", familias: 29 },
+      { label: "Los Candiles + Jardín Cauquén", familias: 21 },
+      { label: "Los Candiles + Colegio Los Caminos + Jardín Cauquén", familias: 19 },
+    ],
+  },
+  [normalizeSchoolForCompare("Jardín Cauquén")]: {
+    titleSchool: "Jardín Cauquén",
+    polo: "Pilar",
+    year: 2024,
+    total: 98,
+    rows: [
+      { label: "Jardín Cauquén", familias: 42 },
+      { label: "Jardín Cauquén + Colegio Los Caminos", familias: 16 },
+      { label: "Jardín Cauquén + Los Candiles", familias: 21 },
+      { label: "Jardín Cauquén + Colegio Los Caminos + Los Candiles", familias: 19 },
+    ],
+  },
+};
+
+const getStaticFamilyDistribution = (school?: string | null, year?: number | null) => {
+  const numericYear = Number(year);
+  const key = normalizeSchoolForCompare(school);
+  if (!key) return null;
+
+  if (numericYear === 2025) return STATIC_2025_FAMILY_DISTRIBUTIONS[key] || null;
+  if (numericYear === 2024) return STATIC_2024_FAMILY_DISTRIBUTIONS[key] || null;
+
+  return null;
+};
+
+const getMostFrequentYear = (rows: any[]): number => {
+  const counts: Record<number, number> = {};
+  rows.forEach((row) => {
+    const year = Number(row?.year);
+    if (Number.isFinite(year) && year > 2000) counts[year] = (counts[year] || 0) + 1;
+  });
+  const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  return sorted.length > 0 ? Number(sorted[0][0]) : new Date().getFullYear();
+};
+
 const sameSchoolName = (a?: string | null, b?: string | null) =>
   normalizeSchoolForCompare(a) === normalizeSchoolForCompare(b);
 
@@ -651,6 +1196,35 @@ export default function TeamDashboard({
 
   const selectedSchoolForSharedFamilies = activeSchool !== "Todos los colegios" ? activeSchool : "";
 
+  const sharedFamiliesProjectYear = useMemo(() => getMostFrequentYear(filteredResponses || []), [filteredResponses]);
+
+  const staticFamilyDistribution = useMemo(() => {
+    return getStaticFamilyDistribution(selectedSchoolForSharedFamilies, sharedFamiliesProjectYear);
+  }, [selectedSchoolForSharedFamilies, sharedFamiliesProjectYear]);
+
+  const sharedFamiliesTableRows = useMemo(() => {
+    if (staticFamilyDistribution) {
+      return staticFamilyDistribution.rows.map((row, index) => ({
+        id: `${row.label}-${index}`,
+        label: row.label,
+        familias: row.familias,
+      }));
+    }
+
+    if (!Array.isArray(sharedFamilies?.combinaciones)) return [];
+
+    return sharedFamilies.combinaciones
+      .map((item: any, index: number) => ({
+        id: String(item?.label || `fila-${index}`),
+        label: String(item?.label || "Sin recorrido"),
+        familias: Number(item?.familias || 0),
+      }))
+      .filter((item: any) => item.familias > 0);
+  }, [staticFamilyDistribution, sharedFamilies]);
+
+  const sharedFamiliesTotalForTable = Number(staticFamilyDistribution?.total || 0) ||
+    sharedFamiliesTableRows.reduce((acc: number, row: any) => acc + Number(row.familias || 0), 0);
+
   useEffect(() => {
     let mounted = true;
 
@@ -697,7 +1271,7 @@ export default function TeamDashboard({
 
     // Importante: en Equipo NO cargamos este cruce en “Todos los colegios”.
     // Solo se consulta Neon cuando el usuario selecciona un colegio puntual.
-    if (!projectId || !selectedSchoolForSharedFamilies) {
+    if (!projectId || !selectedSchoolForSharedFamilies || staticFamilyDistribution) {
       setSharedFamilies(null);
       setSharedFamiliesLoading(false);
       return () => {
@@ -736,7 +1310,7 @@ export default function TeamDashboard({
     return () => {
       mounted = false;
     };
-  }, [projectId, selectedSchoolForSharedFamilies]);
+  }, [projectId, selectedSchoolForSharedFamilies, staticFamilyDistribution]);
 
   const handleAddCategory = () => {
     if (!canEditConfig) return;
@@ -1313,65 +1887,56 @@ export default function TeamDashboard({
           </div>
           )}
 
-          {showFamilyExtendedBreakdown && familyParticipationByPolo.length > 0 && (
-            <div className="mt-4 rounded-2xl border border-slate-100 bg-white p-4">
-              <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Cobertura por polo</p>
-              <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2">
-                {familyParticipationByPolo.map((item) => (
-                  <div key={item.polo} className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
-                    <p className="text-xs font-black text-slate-800">{item.polo}</p>
-                    <p className="text-[11px] font-semibold text-slate-500">
-                      {item.familiasConRespuesta} con respuesta · {item.totalFamilias} familias
-                    </p>
-                    <p className="text-sm font-black text-emerald-700">{item.porcentaje}% cobertura</p>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
+          
         </div>
       )}
 
-      {activeSchool !== "Todos los colegios" && (sharedFamiliesLoading || sharedFamilies) && (
+      {activeSchool !== "Todos los colegios" && (sharedFamiliesLoading || sharedFamilies || staticFamilyDistribution) && (
         <div className="mb-6 rounded-[24px] border border-sky-100 bg-sky-50/80 p-5 shadow-sm">
           <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
             <div>
               <p className="text-[10px] font-black uppercase tracking-widest text-sky-700">
-                Dónde más tienen hijos estas familias
+                {staticFamilyDistribution
+                  ? `Distribución de familias ${staticFamilyDistribution.titleSchool} en el Polo ${staticFamilyDistribution.polo}`
+                  : "Dónde más tienen hijos estas familias"}
               </p>
               <p className="mt-1 text-xs font-semibold text-sky-900">
-                Muestra los recorridos familiares dentro del mismo polo.
+                Total: {sharedFamiliesTotalForTable} familias.
               </p>
             </div>
-            {sharedFamilies?.year && (
-              <p className="text-[11px] font-bold text-sky-700">Año {sharedFamilies.year}</p>
+            {(staticFamilyDistribution?.year || sharedFamilies?.year) && (
+              <p className="text-[11px] font-bold text-sky-700">Año {staticFamilyDistribution?.year || sharedFamilies.year}</p>
             )}
           </div>
 
-          {sharedFamiliesLoading && !sharedFamilies?.resumen ? (
+          {sharedFamiliesLoading && !staticFamilyDistribution && !sharedFamilies?.resumen ? (
             <p className="mt-4 rounded-xl border border-sky-100 bg-white px-3 py-2 text-xs font-black text-sky-700">
               Calculando composición entre colegios...
             </p>
-          ) : !sharedFamilies?.resumen ? (
+          ) : !staticFamilyDistribution && !sharedFamilies?.resumen ? (
             <p className="mt-4 rounded-xl border border-amber-100 bg-white px-3 py-2 text-xs font-black text-amber-700">
               {sharedFamilies?.mensaje || "No se encontró composición familiar para este colegio/año."}
             </p>
-          ) : Array.isArray(sharedFamilies?.combinaciones) && sharedFamilies.combinaciones.length > 0 ? (
+          ) : sharedFamiliesTableRows.length > 0 ? (
             <div className="mt-4 overflow-x-auto rounded-2xl border border-sky-100 bg-white">
               <table className="min-w-full text-xs">
                 <thead className="bg-sky-50 text-sky-800">
                   <tr>
-                    <th className="px-3 py-3 text-left font-black uppercase tracking-widest">Recorrido familiar</th>
+                    <th className="px-3 py-3 text-left font-black uppercase tracking-widest">Distribución</th>
                     <th className="px-3 py-3 text-right font-black uppercase tracking-widest">Familias</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {sharedFamilies.combinaciones.map((item: any) => (
-                    <tr key={String(item?.label || "-")} className="border-t border-sky-50 text-slate-700">
-                      <td className="px-3 py-3 font-bold">{item?.label || "Sin recorrido"}</td>
-                      <td className="px-3 py-3 text-right font-black text-sky-800">{Number(item?.familias || 0)}</td>
+                  {sharedFamiliesTableRows.map((item: any) => (
+                    <tr key={item.id} className="border-t border-sky-50 text-slate-700">
+                      <td className="px-3 py-3 font-bold">{item.label}</td>
+                      <td className="px-3 py-3 text-right font-black text-sky-800">{item.familias}</td>
                     </tr>
                   ))}
+                  <tr className="border-t border-sky-100 bg-sky-50/70 text-sky-900">
+                    <td className="px-3 py-3 font-black uppercase tracking-widest">Familias totales</td>
+                    <td className="px-3 py-3 text-right font-black">{sharedFamiliesTotalForTable}</td>
+                  </tr>
                 </tbody>
               </table>
             </div>

@@ -491,9 +491,8 @@ function AnalyticsDashboardLive() {
         // Eso dejaba la pantalla mucho tiempo en "Cargando datos...".
         // Ahora se dispara todo en paralelo y la vista principal aparece apenas
         // están listas las encuestas del proyecto actual.
-        const [projectsResult, compareProjectsResult, surveysResult] = await Promise.allSettled([
+        const [projectsResult, surveysResult] = await Promise.allSettled([
           listarProyectosDB(),
-          listarProyectosComparacionNpsDB(),
           obtenerEncuestasDB(projectId),
         ]);
 
@@ -505,29 +504,12 @@ function AnalyticsDashboardLive() {
             : ((projectsResult.value as any)?.rows || [])
           : [];
 
-        const compareProjs = compareProjectsResult.status === "fulfilled"
-          ? Array.isArray(compareProjectsResult.value)
-            ? compareProjectsResult.value
-            : ((compareProjectsResult.value as any)?.rows || [])
-          : [];
-
-        // En perfiles Director/Equipo, listarProyectosDB trae los proyectos visibles
-        // para entrar al panel. Los proyectos marcados en "Comparación NPS" pueden
-        // no aparecer ahí, pero sí son necesarios para el gráfico de Polo.
         const mergedProjectsMap = new Map<string, any>();
-        [...projs, ...compareProjs].forEach((p: any) => {
+        projs.forEach((p: any) => {
           if (p?.id) mergedProjectsMap.set(String(p.id), p);
         });
         const mergedProjects = Array.from(mergedProjectsMap.values());
         setAllProjects(mergedProjects);
-
-        if (!isAdmin && compareProjs.length > 0) {
-          setConnectedProjectIds(
-            compareProjs
-              .map((p: any) => String(p.id))
-              .filter((id: string) => id !== String(projectId))
-          );
-        }
 
         // EXTRAER AÑO DEL NOMBRE DEL PROYECTO ACTUAL
         const proyectoActual = mergedProjects.find((p: any) => String(p.id) === String(projectId));
@@ -600,6 +582,59 @@ function AnalyticsDashboardLive() {
       cancelled = true;
     };
   }, [projectId, scopedFilters.colegio, isAdmin, isTeam, isOffice]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadCompareProjectsForDirector() {
+      // Los proyectos de comparación/NPS solo se necesitan en Vista Director.
+      // Equipo y Oficina Central no deben disparar esta carga.
+      if (!projectId || effectiveViewMode !== "director") {
+        setConnectedProjectIds([]);
+        setConnectedRows([]);
+        setConnectedRowsLoading(false);
+        return;
+      }
+
+      try {
+        const result = await listarProyectosComparacionNpsDB();
+        if (cancelled) return;
+
+        const compareProjs = Array.isArray(result)
+          ? result
+          : ((result as any)?.rows || []);
+
+        setAllProjects((prev) => {
+          const merged = new Map<string, any>();
+          prev.forEach((p: any) => {
+            if (p?.id) merged.set(String(p.id), p);
+          });
+          compareProjs.forEach((p: any) => {
+            if (p?.id) merged.set(String(p.id), p);
+          });
+          return Array.from(merged.values());
+        });
+
+        if (!isAdmin && compareProjs.length > 0) {
+          setConnectedProjectIds(
+            compareProjs
+              .map((p: any) => String(p.id))
+              .filter((id: string) => id !== String(projectId))
+          );
+        }
+      } catch {
+        if (!cancelled && !isAdmin) {
+          setConnectedProjectIds([]);
+        }
+      }
+    }
+
+    loadCompareProjectsForDirector();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, effectiveViewMode, isAdmin]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
