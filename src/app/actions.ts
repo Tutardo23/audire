@@ -73,6 +73,16 @@ async function assertProjectAccess(projectId: string, userId: string, scope?: Ac
     return;
   }
 
+  // Equipo y Oficina central pueden trabajar sobre todos los proyectos
+  // cuando no tienen una lista cerrada de project_ids en Clerk.
+  // Si les cargamos project_ids explícitos, respetamos esa restricción.
+  if (
+    (currentScope.role === "equipo" || currentScope.role === "oficina") &&
+    currentScope.projectIds.length === 0
+  ) {
+    return;
+  }
+
   const ownerRow = await sql`
     SELECT 1
     FROM projects
@@ -107,7 +117,7 @@ const normalizeScopeValue = (value: unknown): string | undefined => {
 async function getAccessScope(): Promise<AccessScope> {
   const user = await currentUser();
   const metadata = (user?.publicMetadata as any) || {};
-  const role = String(metadata.role ?? "");
+  const role = String(metadata.role ?? "").trim().toLowerCase();
   const colegio = normalizeScopeValue(metadata.colegio ?? metadata.school ?? metadata.colegio_nombre);
   const polo = normalizeScopeValue(metadata.polo ?? metadata.region ?? metadata.zone);
   const rawProjectIds = metadata.project_ids ?? metadata.projectIds ?? [];
@@ -250,6 +260,28 @@ const ProjectThemesSchema = z.array(
   })
 );
 
+
+const DEFAULT_TEAM_SETTINGS = {
+  positiveToneRules: "agradezco, excelente, contento, feliz, recomiendo",
+  constructiveToneRules: "deberia, mejorar, faltaria, sugerencia, podrian",
+};
+
+const ProjectTeamSettingsSchema = z.object({
+  positiveToneRules: z.string().max(1000).optional().default(DEFAULT_TEAM_SETTINGS.positiveToneRules),
+  constructiveToneRules: z.string().max(1000).optional().default(DEFAULT_TEAM_SETTINGS.constructiveToneRules),
+});
+
+async function ensureProjectTeamSettingsTable() {
+  await sql`
+    CREATE TABLE IF NOT EXISTS project_team_settings (
+      project_id uuid PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+      settings jsonb NOT NULL DEFAULT '{}'::jsonb,
+      updated_by text,
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )
+  `;
+}
+
 async function ensureProjectThemesTable() {
   await sql`
     CREATE TABLE IF NOT EXISTS project_themes (
@@ -299,6 +331,15 @@ export async function listarProyectosDB() {
         ORDER BY creado_at DESC
       `;
     }
+  } else if (
+    (scope.role === "equipo" || scope.role === "oficina") &&
+    scope.projectIds.length === 0
+  ) {
+    result = await sql`
+      SELECT id, nombre, descripcion, creado_at
+      FROM projects
+      ORDER BY creado_at DESC
+    `;
   } else if (scope.projectIds.length > 0) {
     result = await sql`
       SELECT id, nombre, descripcion, creado_at
@@ -375,7 +416,7 @@ export async function listarUsuariosClerkDB() {
 
 export async function guardarUsuarioScopeDB(input: {
   userId: string;
-  role: "admin" | "director" | "equipo";
+  role: "admin" | "director" | "equipo" | "oficina";
   colegio?: string;
   polo?: string;
   projectIds?: string[];
@@ -409,7 +450,7 @@ export async function crearUsuarioClerkDB(input: {
   password: string;
   firstName?: string;
   lastName?: string;
-  role: "admin" | "director" | "equipo";
+  role: "admin" | "director" | "equipo" | "oficina";
   colegio?: string;
   polo?: string;
   projectIds?: string[];
@@ -495,10 +536,11 @@ export async function obtenerEncuestasDB(projectId: string) {
   const scope = await getAccessScope();
   await assertProjectAccess(projectId, userId, scope);
 
-  const scopedRole = scope.role === "director" || scope.role === "equipo";
+  const scopedRole = scope.role === "director" || ((scope.role === "equipo" || scope.role === "oficina") && Boolean(scope.colegio || scope.polo));
+  const shouldHideNames = scope.role === "oficina";
   const schoolPattern = sqlLikeNormalizedPattern(scope.colegio);
   const poloPattern = sqlLikeNormalizedPattern(scope.polo);
-  const cacheKey = scopeCacheKey("surveys:preview:v4", userId, scope, [projectId]);
+  const cacheKey = scopeCacheKey("surveys:preview:v5", userId, scope, [projectId]);
   const cached = getServerCache<any[]>(cacheKey);
   if (cached) return cached;
 
@@ -555,9 +597,16 @@ export async function obtenerEncuestasDB(projectId: string) {
   }
 
   // Filtro de seguridad final en JS por si algún nombre vino con variantes raras.
-  const result = !scopedRole
+  // Filtro de seguridad final en JS por si algún nombre vino con variantes raras.
+  const filteredResult = !scopedRole
     ? rows
     : (rows as any[]).filter((r) => matchesScopedText(r?.colegio, scope.colegio) && matchesScopedText(r?.polo, scope.polo));
+
+  // Oficina central puede ver resultados/temas/comentarios, pero nunca nombres.
+  // Esto se hace en servidor para que no alcance con inspeccionar el navegador.
+  const result = shouldHideNames
+    ? (filteredResult as any[]).map((r) => ({ ...r, nombre: "", apellido: "" }))
+    : filteredResult;
 
   setServerCache(cacheKey, result, scopedRole ? 120_000 : 60_000);
   return result;
@@ -592,7 +641,8 @@ export async function obtenerComentarioCompletoEncuestaDB(projectId: string, enc
   const row = (rows as any[])?.[0];
   if (!row) return null;
 
-  const scopedRole = scope.role === "director" || scope.role === "equipo";
+  const scopedRole = scope.role === "director" || ((scope.role === "equipo" || scope.role === "oficina") && Boolean(scope.colegio || scope.polo));
+  const shouldHideNames = scope.role === "oficina";
   if (scopedRole) {
     const bySchool = matchesScopedText(row?.colegio, scope.colegio);
     const byPolo = matchesScopedText(row?.polo, scope.polo);
@@ -619,7 +669,7 @@ export async function obtenerEncuestasComparativoPoloDB(projectId: string) {
   const scope = await getAccessScope();
   await assertProjectAccess(projectId, userId, scope);
 
-  const shouldFilterByPolo = scope.role === "director" || scope.role === "equipo";
+  const shouldFilterByPolo = scope.role === "director" || ((scope.role === "equipo" || scope.role === "oficina") && Boolean(scope.polo));
   const poloPattern = shouldFilterByPolo ? sqlLikeNormalizedPattern(scope.polo) : "";
   const cacheKey = scopeCacheKey("surveys:polo:v2", userId, scope, [projectId]);
   const cached = getServerCache<any[]>(cacheKey);
@@ -646,9 +696,13 @@ export async function obtenerEncuestasComparativoPoloDB(projectId: string) {
     `;
   }
 
-  const result = shouldFilterByPolo && scope.polo
+  const filteredResult = shouldFilterByPolo && scope.polo
     ? (rows as any[]).filter((r) => matchesScopedText(r?.polo, scope.polo))
     : rows;
+
+  const result = scope.role === "oficina"
+    ? (filteredResult as any[]).map((r) => ({ ...r, nombre: "", apellido: "" }))
+    : filteredResult;
 
   setServerCache(cacheKey, result, 180_000);
   return result;
@@ -677,7 +731,7 @@ export async function obtenerEncuestasComparativoPoloBatchDB(projectIdsUnsafe: s
 
   if (allowedIds.length === 0) return [];
 
-  const shouldFilterByPolo = scope.role === "director" || scope.role === "equipo";
+  const shouldFilterByPolo = scope.role === "director" || ((scope.role === "equipo" || scope.role === "oficina") && Boolean(scope.polo));
   const poloPattern = shouldFilterByPolo ? sqlLikeNormalizedPattern(scope.polo) : "";
   const cacheKey = scopeCacheKey("surveys:polo-batch:v1", userId, scope, [allowedIds.sort().join(",")]);
   const cached = getServerCache<any[]>(cacheKey);
@@ -704,9 +758,13 @@ export async function obtenerEncuestasComparativoPoloBatchDB(projectIdsUnsafe: s
     `;
   }
 
-  const result = shouldFilterByPolo && scope.polo
+  const filteredResult = shouldFilterByPolo && scope.polo
     ? (rows as any[]).filter((r) => matchesScopedText(r?.polo, scope.polo))
     : rows;
+
+  const result = scope.role === "oficina"
+    ? (filteredResult as any[]).map((r) => ({ ...r, nombre: "", apellido: "" }))
+    : filteredResult;
 
   setServerCache(cacheKey, result, 180_000);
   return result;
@@ -720,7 +778,7 @@ export async function obtenerEncuestasComparacionLigeraDB(projectId: string) {
   const scope = await getAccessScope();
   await assertProjectAccess(projectId, userId, scope);
 
-  const shouldFilterByPolo = scope.role === "director" || scope.role === "equipo";
+  const shouldFilterByPolo = scope.role === "director" || ((scope.role === "equipo" || scope.role === "oficina") && Boolean(scope.polo));
   const poloPattern = shouldFilterByPolo ? sqlLikeNormalizedPattern(scope.polo) : "";
   const cacheKey = scopeCacheKey("surveys:compare-light:v2", userId, scope, [projectId]);
   const cached = getServerCache<any[]>(cacheKey);
@@ -747,9 +805,13 @@ export async function obtenerEncuestasComparacionLigeraDB(projectId: string) {
     `;
   }
 
-  const result = shouldFilterByPolo && scope.polo
+  const filteredResult = shouldFilterByPolo && scope.polo
     ? (rows as any[]).filter((r) => matchesScopedText(r?.polo, scope.polo))
     : rows;
+
+  const result = scope.role === "oficina"
+    ? (filteredResult as any[]).map((r) => ({ ...r, nombre: "", apellido: "" }))
+    : filteredResult;
 
   setServerCache(cacheKey, result, 180_000);
   return result;
@@ -771,6 +833,9 @@ export async function obtenerRespuestaHistoricaFamiliaDB(
   UUIDSchema.parse(projectId);
   const scope = await getAccessScope();
   await assertProjectAccess(projectId, userId, scope);
+
+  // Oficina central no trabaja con comparación nominal por familia.
+  if (scope.role === "oficina") return null;
 
   const nombre = String(input?.nombre || "").trim();
   const apellido = String(input?.apellido || "").trim();
@@ -911,7 +976,8 @@ export async function eliminarEncuestasDB(projectId: string) {
 export async function compararProyectosDB(projectIdA: string, projectIdB: string) {
   const userId = await requireUserId();
   const scope = await getAccessScope();
-  const scopedRole = scope.role === "director" || scope.role === "equipo";
+  const scopedRole = scope.role === "director" || ((scope.role === "equipo" || scope.role === "oficina") && Boolean(scope.colegio || scope.polo));
+  const shouldHideNames = scope.role === "oficina";
 
   UUIDSchema.parse(projectIdA);
   UUIDSchema.parse(projectIdB);
@@ -1174,25 +1240,150 @@ export async function copiarTemasDesdeProyectoDB(targetProjectId: string, source
 }
 
 
-const DEFAULT_TEAM_SETTINGS = {
-  positiveToneRules: "agradezco, excelente, contento, feliz, recomiendo",
-  constructiveToneRules: "deberia, mejorar, faltaria, sugerencia, podrian",
+type ProjectThemeTarget = {
+  id: string;
+  nombre: string | null;
 };
 
-const ProjectTeamSettingsSchema = z.object({
-  positiveToneRules: z.string().max(1200).optional(),
-  constructiveToneRules: z.string().max(1200).optional(),
-});
+const toProjectThemeTargets = (rows: unknown): ProjectThemeTarget[] => {
+  if (!Array.isArray(rows)) return [];
 
-async function ensureProjectTeamSettingsTable() {
-  await sql`
-    CREATE TABLE IF NOT EXISTS project_team_settings (
-      project_id uuid PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
-      settings jsonb NOT NULL,
-      updated_by text,
-      updated_at timestamptz NOT NULL DEFAULT now()
-    )
+  const result: ProjectThemeTarget[] = [];
+
+  for (const row of rows) {
+    const item = row as { id?: unknown; nombre?: unknown };
+    const id = String(item.id ?? "").trim();
+
+    if (!UUIDSchema.safeParse(id).success) continue;
+
+    result.push({
+      id,
+      nombre: item.nombre == null ? null : String(item.nombre),
+    });
+  }
+
+  return result;
+};
+export async function copiarTemasATodosLosProyectosDB(sourceProjectId: string) {
+  const userId = await requireAdmin();
+  UUIDSchema.parse(sourceProjectId);
+
+  const scope = await getAccessScope();
+  await assertProjectAccess(sourceProjectId, userId, scope);
+  await ensureProjectThemesTable();
+  await ensureProjectThemesHistoryTable();
+
+  const [sourceRows, sourceProjectRows] = await Promise.all([
+    sql`SELECT themes FROM project_themes WHERE project_id = ${sourceProjectId}::uuid LIMIT 1`,
+    sql`SELECT nombre FROM projects WHERE id = ${sourceProjectId}::uuid LIMIT 1`,
+  ]);
+
+  const sourceRaw = (sourceRows?.[0] as { themes?: unknown } | undefined)?.themes;
+  const sourceParsed = ProjectThemesSchema.safeParse(sourceRaw);
+  const sourceThemes = sourceParsed.success ? sourceParsed.data : [];
+
+  if (sourceThemes.length === 0) {
+    throw new Error("El proyecto elegido no tiene categorías guardadas para copiar");
+  }
+
+  const themes = sourceThemes
+    .map((t) => ({
+      id: String(t.id).trim(),
+      keywords: Array.from(new Set(t.keywords.map((x) => String(x).trim()).filter(Boolean))),
+    }))
+    .filter((t) => t.id && t.keywords.length > 0);
+
+  if (themes.length === 0) {
+    throw new Error("El proyecto elegido no tiene categorías válidas para copiar");
+  }
+
+  const sourceProjectName = String((sourceProjectRows?.[0] as { nombre?: unknown } | undefined)?.nombre ?? "Proyecto origen");
+
+  let targetProjects: ProjectThemeTarget[] = [];
+
+  if (scope.role === "admin" && scope.hasProjectScope) {
+    const allowedIds = Array.from(new Set([...scope.projectIds, ...scope.compareProjectIds]))
+      .filter((id) => UUIDSchema.safeParse(id).success && id !== sourceProjectId);
+
+    if (allowedIds.length === 0) {
+      return { ok: true, sourceProjectName, updatedCount: 0 };
+    }
+
+    const rows = await sql`
+      SELECT id::text AS id, nombre
+      FROM projects
+      WHERE id = ANY(${allowedIds}::uuid[])
+        AND id <> ${sourceProjectId}::uuid
+      ORDER BY creado_at DESC
+    `;
+
+    targetProjects = toProjectThemeTargets(rows);
+  } else {
+    const rows = await sql`
+      SELECT id::text AS id, nombre
+      FROM projects
+      WHERE id <> ${sourceProjectId}::uuid
+      ORDER BY creado_at DESC
+    `;
+
+    targetProjects = toProjectThemeTargets(rows);
+  }
+
+  const targetIds = targetProjects.map((project) => project.id);
+
+  if (targetIds.length === 0) {
+    return { ok: true, sourceProjectName, updatedCount: 0 };
+  }
+
+  const currentTargetRows = await sql`
+    SELECT project_id::text AS project_id, themes
+    FROM project_themes
+    WHERE project_id = ANY(${targetIds}::uuid[])
   `;
+
+  const previousThemesByProject = new Map<string, unknown>();
+  (Array.isArray(currentTargetRows) ? currentTargetRows : []).forEach((row) => {
+    const typedRow = row as { project_id?: unknown; themes?: unknown };
+    const projectIdFromRow = String(typedRow.project_id ?? "");
+    if (!projectIdFromRow) return;
+
+    const parsed = ProjectThemesSchema.safeParse(typedRow.themes);
+    previousThemesByProject.set(projectIdFromRow, parsed.success ? parsed.data : []);
+  });
+
+  for (const target of targetProjects) {
+    const previousThemes = previousThemesByProject.get(target.id) ?? [];
+
+    await sql`
+      INSERT INTO project_themes_history (project_id, changes, updated_by)
+      VALUES (
+        ${target.id}::uuid,
+        ${JSON.stringify([{
+          type: "bulk_copy_from_project",
+          sourceProjectId,
+          sourceProjectName,
+          snapshotBefore: previousThemes,
+          snapshotAfter: themes,
+        }])}::jsonb,
+        ${userId}
+      )
+    `;
+
+    await sql`
+      INSERT INTO project_themes (project_id, themes, updated_by, updated_at)
+      VALUES (${target.id}::uuid, ${JSON.stringify(themes)}::jsonb, ${userId}, now())
+      ON CONFLICT (project_id)
+      DO UPDATE SET
+        themes = EXCLUDED.themes,
+        updated_by = EXCLUDED.updated_by,
+        updated_at = now()
+    `;
+  }
+
+  deleteServerCacheByPrefix("themes:");
+  deleteServerCacheByPrefix("projects:");
+
+  return { ok: true, sourceProjectName, updatedCount: targetProjects.length };
 }
 
 export async function obtenerConfiguracionEquipoProyectoDB(projectId: string) {
@@ -1313,6 +1504,10 @@ export async function importarFamiliasStagingDB(formData: FormData) {
     )
   `;
 
+  await sql`CREATE INDEX IF NOT EXISTS idx_family_import_batches_project_created ON family_import_batches(project_id, created_at DESC)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_family_staging_project_group_batch ON family_staging_raw(project_id, grupo, batch_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_family_staging_project_batch ON family_staging_raw(project_id, batch_id)`;
+
   let inserted = 0;
 
   const specsBySheet = new Map(
@@ -1376,6 +1571,7 @@ export async function importarFamiliasStagingDB(formData: FormData) {
     WHERE id = ${batchId}::uuid
   `;
 
+  await cleanupPreviousFamilyStagingForGroup(projectId, group, batchId);
   await invalidateFamilySharedSnapshots(projectId);
 
   return { ok: true, batchId, inserted };
@@ -1407,6 +1603,54 @@ function pickByCandidates(row: Record<string, unknown>, candidates: string[]): s
 
   return null;
 }
+
+async function cleanupPreviousFamilyStagingForGroup(projectId: string, group: FamilyGroup, currentBatchId: string) {
+  // Ahorro Neon: conservamos solo el último staging de cada proyecto/grupo.
+  // No borramos el staging actual porque el módulo de familias compartidas lo usa como fuente.
+  try {
+    const oldBatches = await sql`
+      SELECT DISTINCT batch_id::text AS batch_id
+      FROM family_staging_raw
+      WHERE project_id = ${projectId}::uuid
+        AND grupo = ${group}
+        AND batch_id <> ${currentBatchId}::uuid
+    ` as Array<{ batch_id: string }>;
+
+    const oldBatchIds = oldBatches.map((row) => row.batch_id).filter(Boolean);
+    if (oldBatchIds.length === 0) return;
+
+    try {
+      await sql`
+        DELETE FROM family_import_conflicts
+        WHERE project_id = ${projectId}::uuid
+          AND batch_id = ANY(${oldBatchIds}::uuid[])
+      `;
+    } catch {
+      // Puede no existir todavía en instalaciones viejas. No rompemos la importación por limpieza.
+    }
+
+    await sql`
+      DELETE FROM family_staging_raw
+      WHERE project_id = ${projectId}::uuid
+        AND grupo = ${group}
+        AND batch_id = ANY(${oldBatchIds}::uuid[])
+    `;
+
+    await sql`
+      DELETE FROM family_import_batches fib
+      WHERE fib.project_id = ${projectId}::uuid
+        AND fib.id = ANY(${oldBatchIds}::uuid[])
+        AND NOT EXISTS (
+          SELECT 1
+          FROM family_staging_raw fsr
+          WHERE fsr.batch_id = fib.id
+        )
+    `;
+  } catch {
+    // La limpieza es optimización de storage. Nunca debe frenar una carga válida.
+  }
+}
+
 function normalizeMatchText(value: unknown): string {
   return String(value ?? "")
     .normalize("NFD")
@@ -2080,6 +2324,7 @@ export async function guardarParticipacionFamiliarProyectoDB(input: {
       updated_at = now()
   `;
 
+  deleteServerCacheByPrefix("family:participation:");
   return { ok: true };
 }
 
@@ -3221,4 +3466,99 @@ export async function listarAccessLogsDB(inputUnsafe?: unknown) {
     project_name: row?.metadata?.projectName || "",
     created_at: row.created_at ? new Date(row.created_at).toISOString() : "",
   }));
+}
+
+
+
+function normalizeProjectThemesForBulk(raw: unknown): Array<{ id: string; keywords: string[] }> {
+  const parsed = ProjectThemesSchema.safeParse(raw);
+  if (parsed.success) return parsed.data;
+
+  if (Array.isArray(raw)) {
+    return raw
+      .map((item) => {
+        const id = String((item as { id?: unknown; name?: unknown })?.id ?? (item as { name?: unknown })?.name ?? "").trim();
+        const keywords = Array.isArray((item as { keywords?: unknown })?.keywords)
+          ? ((item as { keywords?: unknown[] }).keywords ?? []).map((x) => String(x).trim()).filter(Boolean)
+          : [];
+        return id && keywords.length > 0 ? { id, keywords } : null;
+      })
+      .filter(Boolean) as Array<{ id: string; keywords: string[] }>;
+  }
+
+  return [];
+}
+
+
+// Copia categorías de un proyecto origen a todos los demás proyectos.
+// Es una acción solo admin, pensada para aplicar las categorías aprobadas
+// sin tocar encuestas, familias ni comentarios.
+export async function aplicarTemasProyectoATodosDB(sourceProjectId: string) {
+  const userId = await requireAdmin();
+  UUIDSchema.parse(sourceProjectId);
+
+  const scope = await getAccessScope();
+  await assertProjectAccess(sourceProjectId, userId, scope);
+  await ensureProjectThemesTable();
+  await ensureProjectThemesHistoryTable();
+
+  const sourceRows = await sql`
+    SELECT themes
+    FROM project_themes
+    WHERE project_id = ${sourceProjectId}::uuid
+    LIMIT 1
+  `;
+
+  const sourceThemes = normalizeProjectThemesForBulk((sourceRows?.[0] as { themes?: unknown } | undefined)?.themes);
+  if (sourceThemes.length === 0) {
+    throw new Error("El proyecto origen no tiene categorías guardadas.");
+  }
+
+  const projectRows = await sql`
+    SELECT id::text AS id, nombre
+    FROM projects
+    WHERE id <> ${sourceProjectId}::uuid
+    ORDER BY creado_at DESC
+  `;
+
+  const targets = toProjectThemeTargets(projectRows).map((project) => project.id);
+
+  for (const targetProjectId of targets) {
+    const currentRows = await sql`
+      SELECT themes
+      FROM project_themes
+      WHERE project_id = ${targetProjectId}::uuid
+      LIMIT 1
+    `;
+
+    const currentThemes = normalizeProjectThemesForBulk((currentRows?.[0] as { themes?: unknown } | undefined)?.themes);
+
+    await sql`
+      INSERT INTO project_themes_history (project_id, changes, updated_by)
+      VALUES (
+        ${targetProjectId}::uuid,
+        ${JSON.stringify([{
+          type: "bulk_copy_from_project",
+          sourceProjectId,
+          snapshotBefore: currentThemes,
+          snapshotAfter: sourceThemes,
+        }])}::jsonb,
+        ${userId}
+      )
+    `;
+
+    await sql`
+      INSERT INTO project_themes (project_id, themes, updated_by, updated_at)
+      VALUES (${targetProjectId}::uuid, ${JSON.stringify(sourceThemes)}::jsonb, ${userId}, now())
+      ON CONFLICT (project_id)
+      DO UPDATE SET
+        themes = EXCLUDED.themes,
+        updated_by = EXCLUDED.updated_by,
+        updated_at = now()
+    `;
+  }
+
+  deleteServerCacheByPrefix("themes:");
+  deleteServerCacheByPrefix("projects:");
+  return { ok: true, updated: targets.length };
 }

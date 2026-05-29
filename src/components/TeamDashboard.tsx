@@ -26,8 +26,6 @@ import {
   obtenerConfiguracionEquipoProyectoDB,
   guardarConfiguracionEquipoProyectoDB,
   obtenerFamiliasCompartidasProyectoDB,
-  listarProyectosDB,
-  copiarTemasDesdeProyectoDB,
 } from "../app/actions";
 
 // ─────────────────────────────────────────────
@@ -305,6 +303,29 @@ function KpiCard({ title, value, subtitle, icon, accent = "text-slate-900" }: { 
   );
 }
 
+const anonymousPersonLabel = (id?: string | null) => {
+  const raw = String(id ?? "");
+  let hash = 0;
+
+  for (let i = 0; i < raw.length; i += 1) {
+    hash = (hash * 31 + raw.charCodeAt(i)) % 10000;
+  }
+
+  const code = String(hash || 1).padStart(4, "0");
+  return `Persona xxxx-${code}`;
+};
+
+const getPersonDisplayName = (row: Partial<SurveyRow> | null | undefined, anonymizePeople = false) => {
+  if (anonymizePeople) return anonymousPersonLabel(row?.id);
+  const name = `${row?.nombre ?? ""} ${row?.apellido ?? ""}`.trim();
+  return name || "Familia anónima";
+};
+
+const getShortPersonDisplayName = (row: Partial<SurveyRow> | null | undefined, anonymizePeople = false) => {
+  if (anonymizePeople) return anonymousPersonLabel(row?.id);
+  return row?.nombre || row?.apellido ? `${row?.nombre ?? ""} ${row?.apellido ?? ""}`.trim() : "Familia anónima";
+};
+
 // ─────────────────────────────────────────────
 // TARJETA DE RESPUESTA (COMPACTA Y CON SCROLL)
 // ─────────────────────────────────────────────
@@ -314,14 +335,16 @@ function SurveyCard({
   extraKeywords,
   isSaved,
   onToggleSave,
+  anonymizePeople = false,
 }: {
   res: SurveyRow;
   searchTerm: string;
   extraKeywords: string[];
   isSaved: boolean;
   onToggleSave: (id: string) => void;
+  anonymizePeople?: boolean;
 }) {
-  const displayName = res.nombre || res.apellido ? `${res.nombre} ${res.apellido}`.trim() : "Familia anónima";
+  const displayName = getPersonDisplayName(res, anonymizePeople);
 
   return (
     <div className="group flex flex-col overflow-hidden rounded-[24px] border border-white bg-white/80 p-5 shadow-xl backdrop-blur-xl transition-all duration-200 hover:-translate-y-1 hover:shadow-2xl">
@@ -441,7 +464,7 @@ function aggregateChildrenComposition(rows: any[]) {
 }
 
 const familyParticipationCacheKey = (projectId?: string) =>
-  projectId ? `apdes:family-participation:${projectId}` : "";
+  projectId ? `apdes:family-participation:v4:${projectId}` : "";
 
 const readFamilyParticipationCache = (projectId?: string) => {
   if (typeof window === "undefined") return null;
@@ -511,6 +534,7 @@ type TeamDashboardProps = {
   projectId?: string;
   activeSchool?: string;
   canEditConfig?: boolean;
+  anonymizePeople?: boolean;
 };
 
 export default function TeamDashboard({
@@ -526,6 +550,7 @@ export default function TeamDashboard({
   projectId,
   activeSchool = "Todos los colegios",
   canEditConfig = false,
+  anonymizePeople = false,
 }: TeamDashboardProps) {
   void downloadCSV;
   
@@ -559,11 +584,6 @@ export default function TeamDashboard({
   const [teamSettingsHydrated, setTeamSettingsHydrated] = useState(false);
   const [syncingProjectConfig, setSyncingProjectConfig] = useState(false);
   const [syncMessage, setSyncMessage] = useState("");
-  const [copyThemesOpen, setCopyThemesOpen] = useState(false);
-  const [copySourceProjectId, setCopySourceProjectId] = useState("");
-  const [copyThemesLoading, setCopyThemesLoading] = useState(false);
-  const [copyThemesMessage, setCopyThemesMessage] = useState("");
-  const [copySourceProjects, setCopySourceProjects] = useState<any[]>([]);
   const skipNextThemeSaveRef = useRef(false);
   const skipNextTeamSettingsSaveRef = useRef(false);
   const lastSavedCategoriesKeyRef = useRef<string>(categoriesKey(DEFAULT_RADAR_CATEGORIES));
@@ -653,7 +673,7 @@ export default function TeamDashboard({
 
     setFamilyParticipationLoading(true);
 
-    cachedClientAction(`apdes:action:family-participation:${projectId}`, () => obtenerParticipacionFamiliarProyectoDB(projectId))
+    cachedClientAction(`apdes:action:family-participation:v4:${projectId}`, () => obtenerParticipacionFamiliarProyectoDB(projectId))
       .then((data) => {
         if (!mounted) return;
         setFamilyParticipation(data);
@@ -717,51 +737,6 @@ export default function TeamDashboard({
       mounted = false;
     };
   }, [projectId, selectedSchoolForSharedFamilies]);
-
-  const openCopyThemesPanel = () => {
-    if (!canEditConfig) return;
-    setCopyThemesOpen((prev) => !prev);
-    setCopyThemesMessage("");
-
-    if (copySourceProjects.length === 0) {
-      listarProyectosDB()
-        .then((projects: any) => {
-          const rows = Array.isArray(projects) ? projects : projects?.rows || [];
-          setCopySourceProjects(rows);
-        })
-        .catch(() => setCopyThemesMessage("No se pudieron cargar los proyectos origen."));
-    }
-  };
-
-  const copyThemesFromProject = () => {
-    if (!canEditConfig || !projectId || !copySourceProjectId) return;
-
-    const sourceProject = copySourceProjects.find((p: any) => String(p?.id) === String(copySourceProjectId));
-    const sourceName = String(sourceProject?.nombre || "el proyecto seleccionado");
-    const confirmed = window.confirm(
-      `Vas a reemplazar las categorías de este proyecto con las de “${sourceName}”.\n\nAntes de copiar, se guarda un respaldo en el historial para poder volver atrás. ¿Confirmás?`
-    );
-    if (!confirmed) return;
-
-    setCopyThemesLoading(true);
-    setCopyThemesMessage("Copiando categorías...");
-
-    copiarTemasDesdeProyectoDB(projectId, copySourceProjectId)
-      .then((result: any) => {
-        const mapped = mapThemesToCategories(result?.themes);
-        const nextKey = categoriesKey(mapped);
-        lastSavedCategoriesKeyRef.current = nextKey;
-        skipNextThemeSaveRef.current = true;
-        setCustomCategories(mapped);
-        setActiveCategory(null);
-        setSyncMessage(`Categorías copiadas desde “${String(result?.sourceProjectName || sourceName)}”. Se guardó respaldo en el historial.`);
-        setCopyThemesMessage("");
-        setCopyThemesOpen(false);
-        setCopySourceProjectId("");
-      })
-      .catch((err: any) => setCopyThemesMessage(err?.message || "No se pudieron copiar las categorías."))
-      .finally(() => setCopyThemesLoading(false));
-  };
 
   const handleAddCategory = () => {
     if (!canEditConfig) return;
@@ -964,6 +939,22 @@ export default function TeamDashboard({
   const processedResponses = useMemo(() => {
     let result = [...filteredResponses];
 
+    const search = normalize(searchTerm);
+    if (search) {
+      result = result.filter((r) => {
+        const haystack = normalize([
+          anonymizePeople ? "" : r.nombre,
+          anonymizePeople ? "" : r.apellido,
+          r.colegio,
+          r.curso,
+          r.polo,
+          r.positive,
+          r.improvement,
+        ].join(" "));
+        return haystack.includes(search);
+      });
+    }
+
     if (savedFilter === "saved") {
       result = result.filter((r) => savedCommentIds.includes(r.id));
     }
@@ -979,7 +970,7 @@ export default function TeamDashboard({
     }
 
     return result;
-  }, [filteredResponses, sortBy, savedFilter, savedCommentIds, sessionSeed]);
+  }, [filteredResponses, searchTerm, sortBy, savedFilter, savedCommentIds, sessionSeed, anonymizePeople]);
 
   // Filtro por categoría SOLO para comentarios del bloque inferior
   const commentResponses = useMemo(() => {
@@ -1121,7 +1112,7 @@ export default function TeamDashboard({
           <div className="w-full max-w-2xl rounded-[24px] border border-white bg-white p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="mb-4 flex items-start justify-between">
               <div>
-                <h3 className="font-display text-xl font-black text-slate-900">{selectedDetail.nombre || "Familia anónima"} {selectedDetail.apellido}</h3>
+                <h3 className="font-display text-xl font-black text-slate-900">{getPersonDisplayName(selectedDetail, anonymizePeople)}</h3>
                 <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">{selectedDetail.colegio} • {selectedDetail.curso}</p>
               </div>
               <button onClick={() => setSelectedDetail(null)} className="rounded-full p-2 text-slate-500 hover:bg-slate-100">
@@ -1175,7 +1166,7 @@ export default function TeamDashboard({
               {radarTopicDetail.samples.map((r) => (
                 <div key={r.id} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                   <div className="mb-1 flex items-center justify-between">
-                    <span className="text-xs font-black text-slate-800">{r.nombre || "Familia anónima"} {r.apellido}</span>
+                    <span className="text-xs font-black text-slate-800">{getPersonDisplayName(r, anonymizePeople)}</span>
                     <span className="text-[10px] font-bold text-slate-500">{r.type} • Nota {r.score}</span>
                   </div>
                   <p className="text-xs font-semibold leading-relaxed text-slate-700">“{r.improvement || r.positive || "Sin comentario"}”</p>
@@ -1512,7 +1503,7 @@ export default function TeamDashboard({
                   positiveCases.map((item) => (
                     <button key={item.id} onClick={() => setSelectedDetail(item)} className="w-full rounded-xl border border-emerald-100 bg-emerald-50/50 p-3 text-left">
                       <div className="flex items-center justify-between">
-                        <span className="text-xs font-black text-slate-800">{item.nombre || "Familia anónima"} {item.apellido}</span>
+                        <span className="text-xs font-black text-slate-800">{getPersonDisplayName(item, anonymizePeople)}</span>
                         <span className="rounded-lg bg-emerald-600 px-2 py-1 text-[10px] font-black text-white">Nota {item.score}</span>
                       </div>
                       <p className="mt-2 text-xs font-semibold leading-relaxed text-slate-700">
@@ -1534,7 +1525,7 @@ export default function TeamDashboard({
                   constructiveCases.map((item) => (
                     <button key={item.id} onClick={() => setSelectedDetail(item)} className="w-full rounded-xl border border-blue-100 bg-blue-50/50 p-3 text-left">
                       <div className="flex items-center justify-between">
-                        <span className="text-xs font-black text-slate-800">{item.nombre || "Familia anónima"} {item.apellido}</span>
+                        <span className="text-xs font-black text-slate-800">{getPersonDisplayName(item, anonymizePeople)}</span>
                         <span className="rounded-lg bg-blue-600 px-2 py-1 text-[10px] font-black text-white">Nota {item.score}</span>
                       </div>
                       <p className="mt-2 text-xs font-semibold leading-relaxed text-slate-700">
@@ -1571,12 +1562,6 @@ export default function TeamDashboard({
                 </button>
                 {canEditConfig && (
                   <>
-                    <button
-                      onClick={openCopyThemesPanel}
-                      className="rounded-lg border border-indigo-200 bg-white px-3 py-1.5 text-[10px] font-black uppercase tracking-widest text-indigo-700 shadow-sm transition-all hover:bg-indigo-50"
-                    >
-                      Copiar categorías
-                    </button>
                     <button 
                       onClick={() => setIsCreatingCat(!isCreatingCat)} 
                       className="flex items-center gap-1 rounded-lg bg-white px-3 py-1.5 text-[10px] font-black uppercase tracking-widest text-blue-600 shadow-sm transition-all hover:bg-blue-600 hover:text-white"
@@ -1587,37 +1572,6 @@ export default function TeamDashboard({
                 )}
               </div>
             </div>
-            {canEditConfig && copyThemesOpen && (
-              <div className="mb-3 grid grid-cols-1 gap-2 rounded-xl border border-indigo-100 bg-white p-3 sm:grid-cols-[1fr_auto]">
-                <select
-                  value={copySourceProjectId}
-                  onChange={(e) => setCopySourceProjectId(e.target.value)}
-                  className="rounded-lg border border-indigo-100 bg-indigo-50/30 px-3 py-2 text-xs font-bold text-slate-700 outline-none focus:border-indigo-300"
-                >
-                  <option value="">Elegí proyecto origen...</option>
-                  {copySourceProjects
-                    .filter((p: any) => String(p?.id) !== String(projectId))
-                    .map((p: any) => (
-                      <option key={p.id} value={p.id}>{String(p.nombre || "Proyecto")}</option>
-                    ))}
-                </select>
-                <button
-                  onClick={copyThemesFromProject}
-                  disabled={!copySourceProjectId || copyThemesLoading}
-                  className="rounded-lg bg-indigo-600 px-4 py-2 text-xs font-black text-white transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {copyThemesLoading ? "Copiando..." : "Copiar acá"}
-                </button>
-                <p className="sm:col-span-2 text-[11px] font-bold text-indigo-700">
-                  Reemplaza las categorías actuales y guarda respaldo automático en el historial.
-                </p>
-              </div>
-            )}
-            {copyThemesMessage && (
-              <p className="mb-3 rounded-xl border border-indigo-100 bg-white px-3 py-2 text-xs font-black text-indigo-700">
-                {copyThemesMessage}
-              </p>
-            )}
             {syncMessage && (
               <p className="mb-3 rounded-xl border border-blue-100 bg-white px-3 py-2 text-xs font-black text-blue-700">
                 {syncMessage}
@@ -1766,7 +1720,7 @@ export default function TeamDashboard({
             <MagnifyingGlass size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <input 
               type="text" 
-              placeholder="Buscar familia..." 
+              placeholder="Buscar apellido, colegio o comentario..." 
               value={searchTerm} 
               onChange={(e) => { setSearchTerm(e.target.value); setCurrentPage(1); }} 
               className="w-full rounded-xl border border-slate-200 bg-white py-2 pl-9 pr-8 text-sm font-bold text-slate-700 outline-none transition-all focus:border-blue-300 focus:ring-2 shadow-sm" 
@@ -1807,6 +1761,7 @@ export default function TeamDashboard({
               extraKeywords={activeKeywords}
               isSaved={savedCommentIds.includes(res.id)}
               onToggleSave={toggleSaveComment}
+              anonymizePeople={anonymizePeople}
             />
           ))}
         </div>

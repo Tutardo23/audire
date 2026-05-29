@@ -12,7 +12,7 @@ type AdminUser = {
   nombre: string;
   firstName?: string;
   lastName?: string;
-  role: "admin" | "director" | "equipo" | "";
+  role: "admin" | "director" | "equipo" | "oficina" | "";
   colegio: string;
   polo: string;
   projectIds: string[];
@@ -34,7 +34,7 @@ export default function AdminAssignmentsPage() {
   const [newPassword, setNewPassword] = useState("");
   const [newFirstName, setNewFirstName] = useState("");
   const [newLastName, setNewLastName] = useState("");
-  const [newRole, setNewRole] = useState<"director" | "equipo" | "admin">("director");
+  const [newRole, setNewRole] = useState<"director" | "equipo" | "admin" | "oficina">("director");
   const [newColegio, setNewColegio] = useState("");
   const [newPolo, setNewPolo] = useState("");
 
@@ -93,6 +93,7 @@ export default function AdminAssignmentsPage() {
             <select value={newRole} onChange={(e) => setNewRole(e.target.value as any)} className="rounded-xl border px-3 py-2 text-sm font-bold">
               <option value="director">Director</option>
               <option value="equipo">Equipo</option>
+              <option value="oficina">Oficina central</option>
               <option value="admin">Admin</option>
             </select>
             <input value={newColegio} onChange={(e) => setNewColegio(e.target.value)} placeholder="Colegio" className="rounded-xl border px-3 py-2 text-sm" />
@@ -159,6 +160,7 @@ export default function AdminAssignmentsPage() {
                           <option value="admin">Admin</option>
                           <option value="director">Director</option>
                           <option value="equipo">Equipo</option>
+                          <option value="oficina">Oficina central</option>
                         </select>
                       </div>
 
@@ -168,7 +170,25 @@ export default function AdminAssignmentsPage() {
                       </div>
 
                       <div className="mt-3 rounded-xl border border-slate-200 bg-white p-3">
-                        <p className="mb-2 text-[10px] font-black uppercase tracking-widest text-slate-500">Proyectos visibles</p>
+                        <div className="mb-2 flex items-center justify-between gap-2">
+                          <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Proyectos visibles</p>
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => setUsers((prev) => prev.map((x) => x.id === u.id ? { ...x, projectIds: projects.map((p) => p.id) } : x))}
+                              className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[10px] font-black text-slate-500 hover:bg-slate-50"
+                            >
+                              Todos
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setUsers((prev) => prev.map((x) => x.id === u.id ? { ...x, projectIds: [] } : x))}
+                              className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[10px] font-black text-slate-500 hover:bg-slate-50"
+                            >
+                              Limpiar
+                            </button>
+                          </div>
+                        </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-1">
                           {projects.map((p) => (
                             <label key={p.id} className="flex items-center gap-2 text-xs font-semibold text-slate-700">
@@ -196,7 +216,25 @@ export default function AdminAssignmentsPage() {
                         </div>
                       </div>
                       <div className="mt-3 rounded-xl border border-indigo-200 bg-indigo-50 p-3">
-                        <p className="mb-2 text-[10px] font-black uppercase tracking-widest text-indigo-600">Comparación NPS (Director)</p>
+                        <div className="mb-2 flex items-center justify-between gap-2">
+                          <p className="text-[10px] font-black uppercase tracking-widest text-indigo-600">Comparación NPS (Director)</p>
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => setUsers((prev) => prev.map((x) => x.id === u.id ? { ...x, compareProjectIds: projects.map((p) => p.id) } : x))}
+                              className="rounded-lg border border-indigo-200 bg-white px-2 py-1 text-[10px] font-black text-indigo-600 hover:bg-indigo-50"
+                            >
+                              Todos
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setUsers((prev) => prev.map((x) => x.id === u.id ? { ...x, compareProjectIds: [] } : x))}
+                              className="rounded-lg border border-indigo-200 bg-white px-2 py-1 text-[10px] font-black text-indigo-600 hover:bg-indigo-50"
+                            >
+                              Limpiar
+                            </button>
+                          </div>
+                        </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-1">
                           {projects.map((p) => (
                             <label key={`cmp-${p.id}`} className="flex items-center gap-2 text-xs font-semibold text-slate-700">

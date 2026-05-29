@@ -46,7 +46,6 @@ import {
   obtenerHistorialTemasProyectoDB,
   obtenerParticipacionFamiliarProyectoDB,
   obtenerFamiliasCompartidasProyectoDB,
-  copiarTemasDesdeProyectoDB,
 } from "../app/actions";
 
 // ─────────────────────────────────────────────
@@ -112,6 +111,8 @@ export type SurveyRow = {
   year: number;
   projectId?: string;
   projectName?: string;
+  anonFamilyKey?: string;
+  anonCompositeKey?: string;
 };
 
 // ─────────────────────────────────────────────
@@ -282,6 +283,25 @@ const getOtherSchoolCardsFromCombinations = (currentSchool: string, combinacione
       label: `Familias compartidas con ${shortSchoolName(item.label)}`,
       value: item.value,
     }));
+};
+
+const normalizeSharedFamilyRow = (item: any, index: number) => ({
+  id: String(item?.label || `fila-${index}`),
+  label: String(item?.label || "Sin clasificación"),
+  familias: Number(item?.familias || 0),
+  isUnclassified: false,
+});
+
+const buildSharedFamiliesDistributionRows = ({
+  combinaciones,
+}: {
+  combinaciones: any[];
+  officialTotal: number;
+  schoolLabel: string;
+}) => {
+  return Array.isArray(combinaciones)
+    ? combinaciones.map(normalizeSharedFamilyRow).filter((row) => row.familias > 0)
+    : [];
 };
 
 
@@ -579,7 +599,7 @@ function aggregateChildrenComposition(rows: any[]) {
 }
 
 const familyParticipationCacheKey = (projectId?: string) =>
-  projectId ? `apdes:family-participation:${projectId}` : "";
+  projectId ? `apdes:family-participation:v4:${projectId}` : "";
 
 const readFamilyParticipationCache = (projectId?: string) => {
   if (typeof window === "undefined") return null;
@@ -689,10 +709,6 @@ export default function DirectorDashboard({
   const [themesHydrated, setThemesHydrated] = useState(false);
   const [themesSyncing, setThemesSyncing] = useState(false);
   const [themesSyncMessage, setThemesSyncMessage] = useState("");
-  const [copyThemesOpen, setCopyThemesOpen] = useState(false);
-  const [copySourceProjectId, setCopySourceProjectId] = useState("");
-  const [copyThemesLoading, setCopyThemesLoading] = useState(false);
-  const [copyThemesMessage, setCopyThemesMessage] = useState("");
   const lastSavedThemesKeyRef = useRef<string>("");
   const skipNextThemeSaveRef = useRef(false);
   const [isCreatingTheme, setIsCreatingTheme] = useState(false);
@@ -705,6 +721,7 @@ export default function DirectorDashboard({
   const [sessionSeed] = useState<number>(() => Date.now());
   const [showSavedOnly, setShowSavedOnly] = useState(false);
   const [commentSearch, setCommentSearch] = useState("");
+  const [commentProfile, setCommentProfile] = useState<"Todos" | DirectorTopic>(directorTopic);
   
   const [compareProjectId, setCompareProjectId] = useState<string>("");
   const [allProjects, setAllProjects] = useState<any[]>([]);
@@ -738,7 +755,7 @@ export default function DirectorDashboard({
 
     setFamilyParticipationLoading(true);
 
-    cachedClientAction(`apdes:action:family-participation:${projectId}`, () => obtenerParticipacionFamiliarProyectoDB(projectId))
+    cachedClientAction(`apdes:action:family-participation:v4:${projectId}`, () => obtenerParticipacionFamiliarProyectoDB(projectId))
       .then((data) => {
         if (!mounted) return;
         setFamilyParticipation(data);
@@ -891,6 +908,25 @@ export default function DirectorDashboard({
     };
   }, [familyParticipation, activeSchool]);
 
+  const sharedFamiliesOfficialTotal = useMemo(() => {
+    const participationTotal = Number(familyParticipationExecutive?.totalFamilias || 0);
+    if (participationTotal > 0) return participationTotal;
+    return Number(sharedFamiliesTotal || 0);
+  }, [familyParticipationExecutive, sharedFamiliesTotal]);
+
+  const sharedFamiliesTableRows = useMemo(() => {
+    return buildSharedFamiliesDistributionRows({
+      combinaciones: Array.isArray(sharedFamilies?.combinaciones) ? sharedFamilies.combinaciones : [],
+      officialTotal: sharedFamiliesOfficialTotal,
+      schoolLabel: sharedFamiliesDisplaySchool || sharedFamiliesTargetSchool || "este colegio",
+    });
+  }, [sharedFamilies, sharedFamiliesOfficialTotal, sharedFamiliesDisplaySchool, sharedFamiliesTargetSchool]);
+
+  const sharedFamiliesClassifiedTotal = useMemo(
+    () => sharedFamiliesTableRows.reduce((acc: number, row: any) => acc + Number(row.familias || 0), 0),
+    [sharedFamiliesTableRows],
+  );
+
   // Estados de la tabla de familias
   const [familyTrendFilter, setFamilyTrendFilter] = useState<"all"|"up"|"down"|"flat">("all");
   const [familyPage, setFamilyPage] = useState(1);
@@ -1038,7 +1074,9 @@ export default function DirectorDashboard({
          improvement: String(item.improvement || ""),
          colegio: String(item.colegio || "APDES"),
          curso: String(item.curso || ""),
-         year: anioComparado
+         year: anioComparado,
+         anonFamilyKey: String(item.anonFamilyKey || ""),
+         anonCompositeKey: String(item.anonCompositeKey || ""),
       })).filter((r: any) => !isNaN(r.score) && r.score > 0);
 
       if (compareTargetSchool) {
@@ -1064,10 +1102,10 @@ export default function DirectorDashboard({
       const currentByName = new Map<string, SurveyRow[]>();
 
       stats.schoolData.forEach((r: SurveyRow) => {
-        const nameKey = normalizeNameMatch(r.nombre, r.apellido);
+        const nameKey = String(r.anonFamilyKey || normalizeNameMatch(r.nombre, r.apellido));
         if (nameKey.length <= 3) return;
 
-        const compositeKey = normalizedFamilyKey(r.nombre, r.apellido, r.colegio, r.curso);
+        const compositeKey = String(r.anonCompositeKey || normalizedFamilyKey(r.nombre, r.apellido, r.colegio, r.curso));
         if (!currentByComposite.has(compositeKey)) currentByComposite.set(compositeKey, r);
 
         const bucket = currentByName.get(nameKey) || [];
@@ -1077,10 +1115,10 @@ export default function DirectorDashboard({
 
       const intersection: any[] = [];
       validRows.forEach((r: any) => {
-        const nameKey = normalizeNameMatch(r.nombre, r.apellido);
+        const nameKey = String(r.anonFamilyKey || normalizeNameMatch(r.nombre, r.apellido));
         if (nameKey.length <= 3) return;
 
-        const compositeKey = normalizedFamilyKey(r.nombre, r.apellido, r.colegio, r.curso);
+        const compositeKey = String(r.anonCompositeKey || normalizedFamilyKey(r.nombre, r.apellido, r.colegio, r.curso));
         let currentFam = currentByComposite.get(compositeKey);
 
         if (!currentFam) {
@@ -1089,9 +1127,12 @@ export default function DirectorDashboard({
           else return;
         }
 
+        const realName = `${currentFam.nombre || ""} ${currentFam.apellido || ""}`.trim();
         const trend = currentFam.score > r.score ? "up" : currentFam.score < r.score ? "down" : "flat";
         intersection.push({
-          nombre: `${currentFam.nombre} ${currentFam.apellido}`.trim(),
+          matchKey: nameKey,
+          nombre: realName,
+          isAnonymous: !realName,
           currentId: currentFam.id,
           currentScore: currentFam.score,
           compareScore: r.score,
@@ -1107,7 +1148,11 @@ export default function DirectorDashboard({
         });
       });
 
-      const uniqueIntersection = Array.from(new Map(intersection.map(item => [item.nombre, item])).values());
+      const uniqueIntersection = Array.from(new Map(intersection.map(item => [item.matchKey || item.nombre, item])).values())
+        .map((item: any, idx: number) => ({
+          ...item,
+          nombre: item.nombre || `Persona anónima ${idx + 1}`,
+        }));
       setCompareData(nextCompareData);
       setCrossFamilyData(uniqueIntersection);
       writeDirectorCompareCache(cacheKey, { compareData: nextCompareData, crossFamilyData: uniqueIntersection });
@@ -1187,14 +1232,21 @@ export default function DirectorDashboard({
   }, [commentTheme, allThemes]);
 
   const directorComments = useMemo(() => {
-    let rows = [...filteredResponses].filter(r => r.type === directorTopic);
+    const search = normalize(commentSearch);
+
+    // Si hay búsqueda, busca en toda la base cargada en esta vista,
+    // sin quedar encerrado por Promotores/Satisfechos/Insatisfechos ni por tema.
+    let rows = search || commentProfile === "Todos"
+      ? [...filteredResponses]
+      : [...filteredResponses].filter((r) => r.type === commentProfile);
+
     rows = rows.filter((r) => String(r.positive ?? "").trim().length > 0 || String(r.improvement ?? "").trim().length > 0);
     
-    if (commentTheme !== "Todos") {
+    if (!search && commentTheme !== "Todos") {
       const theme = allThemes.find(t => t.id === commentTheme);
       if (theme) {
         rows = rows.filter(r => {
-          const rawText = normalize(r.positive + " " + r.improvement);
+          const rawText = normalize(`${r.positive} ${r.improvement}`);
           return theme.keywords.some(kw => rawText.includes(normalize(kw)));
         });
       }
@@ -1204,10 +1256,9 @@ export default function DirectorDashboard({
       rows = rows.filter((r) => savedCommentIds.includes(r.id));
     }
 
-    const search = normalize(commentSearch);
     if (search) {
       rows = rows.filter((r) => {
-        const haystack = normalize(`${r.nombre} ${r.apellido} ${r.colegio} ${r.positive} ${r.improvement}`);
+        const haystack = normalize(`${r.nombre} ${r.apellido} ${r.colegio} ${r.curso} ${r.polo} ${r.positive} ${r.improvement}`);
         return haystack.includes(search);
       });
     }
@@ -1220,7 +1271,7 @@ export default function DirectorDashboard({
     });
 
     return rows.slice(0, directorCommentLimit);
-  }, [filteredResponses, directorTopic, directorCommentLimit, commentTheme, commentRefreshCounter, allThemes, sessionSeed, showSavedOnly, savedCommentIds, commentSearch]);
+  }, [filteredResponses, commentProfile, directorCommentLimit, commentTheme, commentRefreshCounter, allThemes, sessionSeed, showSavedOnly, savedCommentIds, commentSearch]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1354,37 +1405,6 @@ export default function DirectorDashboard({
         setHistoryOpen(true);
       })
       .finally(() => setThemesSyncing(false));
-  };
-
-  const copyThemesFromProject = () => {
-    if (!canEditThemes || !projectId || !copySourceProjectId) return;
-
-    const sourceProject = allProjects.find((p: any) => String(p?.id) === String(copySourceProjectId));
-    const sourceName = String(sourceProject?.nombre || "el proyecto seleccionado");
-    const confirmed = window.confirm(
-      `Vas a reemplazar las categorías de este proyecto con las de “${sourceName}”.\n\nAntes de copiar, se guarda un respaldo en el historial para poder volver atrás. ¿Confirmás?`
-    );
-    if (!confirmed) return;
-
-    setCopyThemesLoading(true);
-    setCopyThemesMessage("Copiando categorías...");
-
-    copiarTemasDesdeProyectoDB(projectId, copySourceProjectId)
-      .then((result: any) => {
-        const normalized = cleanThemes(result?.themes);
-        const nextKey = themesKey(normalized);
-        lastSavedThemesKeyRef.current = nextKey;
-        skipNextThemeSaveRef.current = true;
-        setAllThemes(normalized);
-        setCommentTheme("Todos");
-        setCopyThemesMessage(`Categorías copiadas desde “${String(result?.sourceProjectName || sourceName)}”. Se guardó respaldo en el historial.`);
-        setCopyThemesOpen(false);
-        setCopySourceProjectId("");
-      })
-      .catch((err: any) => {
-        setCopyThemesMessage(err?.message || "No se pudieron copiar las categorías.");
-      })
-      .finally(() => setCopyThemesLoading(false));
   };
 
   const applyThemeHistoryItem = (item: ThemeHistoryItem) => {
@@ -1644,7 +1664,7 @@ export default function DirectorDashboard({
              <div className="bg-slate-50 border-b border-slate-100 p-6 flex items-center justify-between">
                 <div>
                   <h2 className="font-display text-2xl font-black text-slate-900">{selectedFamilyModal.nombre}</h2>
-                  <p className="text-xs font-bold text-slate-500 mt-1 uppercase tracking-widest">Comparación de respuestas por familia</p>
+                  <p className="text-xs font-bold text-slate-500 mt-1 uppercase tracking-widest">Comparación de respuestas por persona</p>
                 </div>
                 <button onClick={() => setSelectedFamilyModal(null)} className="p-2 rounded-full hover:bg-slate-200 text-slate-500 transition-colors">
                    <X size={20} weight="bold" />
@@ -1725,7 +1745,7 @@ export default function DirectorDashboard({
                   </span>
                 </div>
                 <p className="mt-2 text-xs font-bold leading-relaxed text-slate-500">
-                  {familyParticipationExecutive.familiasConRespuesta} de {familyParticipationExecutive.totalFamilias} familias con respuesta.
+                  De {familyParticipationExecutive.totalFamilias} familias, se obtuvieron {familyParticipationExecutive.familiasConRespuesta} respuestas familiares.
                 </p>
                 <p className="mt-1 text-[10px] font-semibold text-slate-400">
                   Cuenta familias, no encuestas individuales.
@@ -1766,10 +1786,10 @@ export default function DirectorDashboard({
           <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
             <div>
               <p className="text-[10px] font-black uppercase tracking-widest text-sky-700">
-                Dónde más tienen hijos estas familias
+                Distribución de familias {shortSchoolName(sharedFamiliesDisplaySchool || sharedFamiliesTargetSchool)} en el {activeSchoolPolo ? `Polo ${activeSchoolPolo}` : "polo"}
               </p>
               <p className="mt-1 text-xs font-semibold text-sky-900">
-                Muestra los recorridos familiares dentro del mismo polo.
+                Total: {sharedFamiliesOfficialTotal || sharedFamiliesTotal} familias. La tabla muestra solo las distribuciones detectadas dentro del polo.
               </p>
             </div>
             {sharedFamilies?.year && (
@@ -1785,22 +1805,26 @@ export default function DirectorDashboard({
             <p className="mt-4 rounded-xl border border-amber-100 bg-white px-3 py-2 text-xs font-black text-amber-700">
               {sharedFamilies?.mensaje || "No se encontró composición familiar para este colegio/año."}
             </p>
-          ) : Array.isArray(sharedFamilies?.combinaciones) && sharedFamilies.combinaciones.length > 0 ? (
+          ) : sharedFamiliesTableRows.length > 0 ? (
             <div className="mt-4 overflow-x-auto rounded-2xl border border-sky-100 bg-white">
               <table className="min-w-full text-xs">
                 <thead className="bg-sky-50 text-sky-800">
                   <tr>
-                    <th className="px-3 py-3 text-left font-black uppercase tracking-widest">Recorrido familiar</th>
+                    <th className="px-3 py-3 text-left font-black uppercase tracking-widest">Distribución</th>
                     <th className="px-3 py-3 text-right font-black uppercase tracking-widest">Familias</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {sharedFamilies.combinaciones.map((item: any) => (
-                    <tr key={item.label} className="border-t border-sky-50 text-slate-700">
+                  {sharedFamiliesTableRows.map((item: any) => (
+                    <tr key={item.id} className="border-t border-sky-50 text-slate-700">
                       <td className="px-3 py-3 font-bold">{item.label}</td>
                       <td className="px-3 py-3 text-right font-black text-sky-800">{item.familias}</td>
                     </tr>
                   ))}
+                  <tr className="border-t border-sky-100 bg-sky-50/70 text-sky-900">
+                    <td className="px-3 py-3 font-black uppercase tracking-widest">Total detectado</td>
+                    <td className="px-3 py-3 text-right font-black">{sharedFamiliesClassifiedTotal}</td>
+                  </tr>
                 </tbody>
               </table>
             </div>
@@ -1864,7 +1888,7 @@ export default function DirectorDashboard({
                         <span className="text-sm font-black text-slate-500">{compareData.total}</span>
                      </div>
                      <p className={`text-xs font-bold text-center mt-2 pt-2 border-t border-slate-100 ${stats.total > compareData.total ? "text-emerald-600" : "text-red-500"}`}>
-                       {stats.total > compareData.total ? `+${stats.total - compareData.total} familias` : `${stats.total - compareData.total} familias`}
+                       {stats.total > compareData.total ? `+${stats.total - compareData.total} respuestas` : `${stats.total - compareData.total} respuestas`}
                      </p>
                   </div>
 
@@ -1894,8 +1918,8 @@ export default function DirectorDashboard({
                       ? `Bajamos ${Math.abs(stats.nps - compareData.nps)} puntos de NPS contra ${compareData.nombre}.`
                       : `Mantuvimos el mismo NPS que ${compareData.nombre}.`}{" "}
                     {stats.total >= compareData.total
-                      ? `También crecimos en participación (+${stats.total - compareData.total} familias).`
-                      : `Además cayó la participación (${stats.total - compareData.total} familias).`}
+                      ? `También crecimos en participación (+${stats.total - compareData.total} respuestas).`
+                      : `Además cayó la participación (${stats.total - compareData.total} respuestas).`}
                   </p>
                 </div>
 
@@ -1903,7 +1927,7 @@ export default function DirectorDashboard({
                 {crossFamilyData.length > 0 ? (
                   <div className="border border-slate-200 bg-white rounded-2xl overflow-hidden flex flex-col shadow-sm">
                     <div className="bg-slate-50 p-3 border-b border-slate-200 flex items-center justify-between">
-                       <span className="text-xs font-black text-slate-700 flex items-center gap-1.5"><Users size={14} weight="fill" className="text-blue-600"/> {crossFamilyData.length} familias en común</span>
+                       <span className="text-xs font-black text-slate-700 flex items-center gap-1.5"><Users size={14} weight="fill" className="text-blue-600"/> {crossFamilyData.length} personas en común</span>
                        <div className="flex bg-slate-200/50 rounded-lg p-1">
                          <button onClick={() => { setFamilyTrendFilter("all"); setFamilyPage(1); }} className={`px-3 py-1 rounded-md text-[10px] font-bold transition-all ${familyTrendFilter === "all" ? "bg-white shadow-sm text-slate-800" : "text-slate-500"}`}>Todas</button>
                          <button onClick={() => { setFamilyTrendFilter("up"); setFamilyPage(1); }} className={`px-3 py-1 rounded-md text-[10px] font-bold transition-all ${familyTrendFilter === "up" ? "bg-emerald-500 shadow-sm text-white" : "text-slate-500"}`}>Mejoraron</button>
@@ -1914,7 +1938,7 @@ export default function DirectorDashboard({
                       <table className="w-full text-left text-sm relative">
                           <thead className="sticky top-0 z-10 bg-slate-50 shadow-sm">
                             <tr className="border-b border-slate-100 text-[10px] uppercase tracking-wider text-slate-400">
-                                <th className="py-3 pl-4">Familia</th>
+                                <th className="py-3 pl-4">Persona</th>
                                 <th className="py-3 text-center">
                                   <div className="flex flex-col items-center justify-center">
                                     <span className="text-[10px] font-bold">{compareData.nombre}</span>
@@ -1967,8 +1991,8 @@ export default function DirectorDashboard({
                   </div>
                 ) : (
                   <div className="flex-1 flex flex-col justify-center items-center text-center p-8 border border-dashed border-slate-200 rounded-2xl bg-slate-50/50">
-                    <p className="text-sm font-bold text-slate-500 mt-4">No se detectaron familias en común.</p>
-                    <p className="text-xs font-medium text-slate-400 mt-1 max-w-[250px]">El sistema cruza datos comparando el Nombre y Apellido ingresados.</p>
+                    <p className="text-sm font-bold text-slate-500 mt-4">No se detectaron personas en común.</p>
+                    <p className="text-xs font-medium text-slate-400 mt-1 max-w-[250px]">El sistema cruza respuestas por claves internas; en oficina central se muestran como personas anónimas.</p>
                   </div>
                 )}
               </>
@@ -2137,20 +2161,26 @@ export default function DirectorDashboard({
           <div className="flex flex-wrap items-center gap-2">
              <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 mr-2">Perfil:</span>
              <button
-                onClick={() => { setDirectorTopic("Promotor"); setCommentRefreshCounter(0); setShowSavedOnly(false); }}
-                className={`rounded-xl px-4 py-2 text-xs font-bold transition-all ${directorTopic === "Promotor" ? "bg-emerald-500 text-white shadow-md" : "bg-white border border-slate-200 text-slate-600 hover:bg-slate-50"}`}
+                onClick={() => { setCommentProfile("Todos"); setCommentRefreshCounter(0); setShowSavedOnly(false); }}
+                className={`rounded-xl px-4 py-2 text-xs font-bold transition-all ${commentProfile === "Todos" && !showSavedOnly ? "bg-slate-800 text-white shadow-md" : "bg-white border border-slate-200 text-slate-600 hover:bg-slate-50"}`}
+             >
+                Todos
+             </button>
+             <button
+                onClick={() => { setCommentProfile("Promotor"); setDirectorTopic("Promotor"); setCommentRefreshCounter(0); setShowSavedOnly(false); }}
+                className={`rounded-xl px-4 py-2 text-xs font-bold transition-all ${commentProfile === "Promotor" && !showSavedOnly ? "bg-emerald-500 text-white shadow-md" : "bg-white border border-slate-200 text-slate-600 hover:bg-slate-50"}`}
              >
                 Promotores
              </button>
              <button
-                onClick={() => { setDirectorTopic("Satisfecho"); setCommentRefreshCounter(0); setShowSavedOnly(false); }}
-                className={`rounded-xl px-4 py-2 text-xs font-bold transition-all ${directorTopic === "Satisfecho" ? "bg-amber-500 text-white shadow-md" : "bg-white border border-slate-200 text-slate-600 hover:bg-slate-50"}`}
+                onClick={() => { setCommentProfile("Satisfecho"); setDirectorTopic("Satisfecho"); setCommentRefreshCounter(0); setShowSavedOnly(false); }}
+                className={`rounded-xl px-4 py-2 text-xs font-bold transition-all ${commentProfile === "Satisfecho" && !showSavedOnly ? "bg-amber-500 text-white shadow-md" : "bg-white border border-slate-200 text-slate-600 hover:bg-slate-50"}`}
              >
                 Satisfechos
              </button>
              <button
-                onClick={() => { setDirectorTopic("Insatisfecho"); setCommentRefreshCounter(0); setShowSavedOnly(false); }}
-                className={`rounded-xl px-4 py-2 text-xs font-bold transition-all ${directorTopic === "Insatisfecho" ? "bg-red-500 text-white shadow-md" : "bg-white border border-slate-200 text-slate-600 hover:bg-slate-50"}`}
+                onClick={() => { setCommentProfile("Insatisfecho"); setDirectorTopic("Insatisfecho"); setCommentRefreshCounter(0); setShowSavedOnly(false); }}
+                className={`rounded-xl px-4 py-2 text-xs font-bold transition-all ${commentProfile === "Insatisfecho" && !showSavedOnly ? "bg-red-500 text-white shadow-md" : "bg-white border border-slate-200 text-slate-600 hover:bg-slate-50"}`}
              >
                 Insatisfechos
              </button>
@@ -2233,45 +2263,7 @@ export default function DirectorDashboard({
                     >
                       {themesSyncing ? "Sincronizando..." : "Sincronizar ahora"}
                     </button>
-                    <button
-                      onClick={() => {
-                        setCopyThemesOpen((prev) => !prev);
-                        setCopyThemesMessage("");
-                      }}
-                      className="rounded-xl border border-indigo-200 bg-white px-3 py-2 text-[11px] font-black text-indigo-700 transition-colors hover:bg-indigo-50"
-                    >
-                      Copiar categorías
-                    </button>
                   </div>
-                )}
-                {canEditThemes && copyThemesOpen && (
-                  <div className="mt-3 grid grid-cols-1 gap-2 rounded-2xl border border-indigo-100 bg-indigo-50/60 p-3 lg:grid-cols-[1fr_auto]">
-                    <select
-                      value={copySourceProjectId}
-                      onChange={(e) => setCopySourceProjectId(e.target.value)}
-                      className="rounded-xl border border-indigo-100 bg-white px-3 py-2 text-xs font-bold text-slate-700 outline-none focus:border-indigo-300"
-                    >
-                      <option value="">Elegí proyecto origen...</option>
-                      {allProjects
-                        .filter((p: any) => String(p?.id) !== String(projectId))
-                        .map((p: any) => (
-                          <option key={p.id} value={p.id}>{String(p.nombre || "Proyecto")}</option>
-                        ))}
-                    </select>
-                    <button
-                      onClick={copyThemesFromProject}
-                      disabled={!copySourceProjectId || copyThemesLoading}
-                      className="rounded-xl bg-indigo-600 px-4 py-2 text-xs font-black text-white transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      {copyThemesLoading ? "Copiando..." : "Copiar acá"}
-                    </button>
-                    <p className="lg:col-span-2 text-[11px] font-bold text-indigo-700">
-                      Reemplaza las categorías actuales y guarda respaldo automático en el historial.
-                    </p>
-                  </div>
-                )}
-                {canEditThemes && copyThemesMessage && (
-                  <p className="mt-2 text-[11px] font-bold text-indigo-700">{copyThemesMessage}</p>
                 )}
                 {canEditThemes && themesSyncMessage && (
                   <p className="mt-2 text-[11px] font-bold text-slate-500">{themesSyncMessage}</p>
@@ -2382,13 +2374,13 @@ export default function DirectorDashboard({
                     {r.positive.trim() && (
                       <div>
                         <p className="mb-1.5 text-[10px] font-black uppercase tracking-widest text-emerald-600 flex items-center gap-1.5"><ThumbsUp size={12} weight="fill"/> Lo que valora</p>
-                        <p className="text-[13px] font-medium text-slate-700 leading-relaxed">&ldquo;{highlightText(r.positive, "", themeKeywords)}&rdquo;</p>
+                        <p className="text-[13px] font-medium text-slate-700 leading-relaxed">&ldquo;{highlightText(r.positive, commentSearch, themeKeywords)}&rdquo;</p>
                       </div>
                     )}
                     {r.improvement.trim() && (
                       <div className="bg-white/60 p-3 rounded-2xl border border-white">
                         <p className="mb-1.5 text-[10px] font-black uppercase tracking-widest text-amber-600 flex items-center gap-1.5"><Wrench size={12} weight="fill"/> Oportunidades de mejora</p>
-                        <p className="text-[13px] font-medium text-slate-800 leading-relaxed">&ldquo;{highlightText(r.improvement, "", themeKeywords)}&rdquo;</p>
+                        <p className="text-[13px] font-medium text-slate-800 leading-relaxed">&ldquo;{highlightText(r.improvement, commentSearch, themeKeywords)}&rdquo;</p>
                       </div>
                     )}
                   </div>

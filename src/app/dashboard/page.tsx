@@ -79,6 +79,8 @@ export default function DashboardHubPage() {
   const { user } = useUser();
   const isAdmin = user?.publicMetadata?.role === "admin";
   const isDirector = user?.publicMetadata?.role === "director";
+  const isTeam = user?.publicMetadata?.role === "equipo";
+  const isOffice = user?.publicMetadata?.role === "oficina";
   const userSchool = String(
     user?.publicMetadata?.colegio ?? user?.publicMetadata?.school ?? "",
   ).trim();
@@ -333,7 +335,8 @@ export default function DashboardHubPage() {
   }, [isProfileOpen]);
 
   const sorted = useMemo(() => {
-    if (!isAdmin) return projects;
+    const shouldGroupProjects = isAdmin || isTeam || isOffice;
+    if (!shouldGroupProjects) return projects;
 
     return [...projects].sort((a, b) => {
       const groupA = getProjectGroup(a.nombre);
@@ -346,7 +349,7 @@ export default function DashboardHubPage() {
 
       return String(a.nombre || "").localeCompare(String(b.nombre || ""));
     });
-  }, [projects, isAdmin]);
+  }, [projects, isAdmin, isTeam, isOffice]);
 
   const handleCreate = async () => {
     const n = nombre.trim();
@@ -490,19 +493,25 @@ export default function DashboardHubPage() {
         <div className="mb-10 flex flex-col md:flex-row md:items-end justify-between gap-4">
           <div className="flex flex-col gap-2">
             <h1 className="font-display text-4xl font-black tracking-tight text-slate-900">
-              Tus Proyectos
+              Audire Familias
             </h1>
             {isDirector ? (
               <p className="text-sm font-medium text-slate-500 max-w-2xl">
-                ¡Hola Director/a! Elegí un proyecto para entrar al panel.
-                Primero revisá NPS general y participación familiar, después
-                abrí la comparación de proyectos del año correspondiente
-                (Mujeres/Jardín) para analizar evolución.
+                Elegí el año disponible para entrar al panel de tu colegio.
+                Primero revisá NPS general, participación familiar y comentarios.
+              </p>
+            ) : isOffice ? (
+              <p className="text-sm font-medium text-slate-500 max-w-2xl">
+                Acceso de oficina central: podés recorrer los proyectos asignados y elegir colegio dentro del panel para ver resultados, temas y comentarios sin nombres ni apellidos de familias.
+              </p>
+            ) : isTeam ? (
+              <p className="text-sm font-medium text-slate-500 max-w-2xl">
+                Acceso de equipo: podés recorrer los proyectos asignados y elegir colegio dentro del panel para analizar resultados y comentarios.
               </p>
             ) : (
               <p className="text-sm font-medium text-slate-500 max-w-xl">
-                Seleccioná un espacio de trabajo para acceder a su panel de
-                control, ver sus encuestas y realizar análisis avanzados.
+                Seleccioná un espacio de trabajo de Audire Familias para acceder
+                al panel de control, ver encuestas y realizar análisis avanzados.
               </p>
             )}
           </div>
@@ -613,7 +622,7 @@ export default function DashboardHubPage() {
                   ? getProjectGroup(sorted[index - 1]?.nombre || "")
                   : null;
               const shouldShowAdminGroupHeader =
-                isAdmin &&
+                (isAdmin || isTeam || isOffice) &&
                 !compareMode &&
                 (!previousGroup || previousGroup.key !== currentGroup.key);
 
@@ -927,7 +936,7 @@ export default function DashboardHubPage() {
               </div>
             </div>
             <p className="mt-3 text-[11px] font-bold text-slate-400">
-              Se leen solo los últimos 80 registros y las
+              Para ahorrar Neon, se leen solo los últimos 80 registros y las
               entradas a proyectos se guardan una vez por sesión.
             </p>
           </div>

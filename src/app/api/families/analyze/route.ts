@@ -40,9 +40,16 @@ type EncuestaDetectada = {
   apellido: string;
   fullName: string;
   dni: string | null;
+  email: string | null;
   matchKey: string;
   schoolMatchKey: string;
   score: number | null;
+};
+
+type MatchAudit = {
+  linkedEncuestaIds: Set<number>;
+  linkedAdultKeys: Set<string>;
+  byEncuestaId: Map<number, string>;
 };
 
 function getSql() {
@@ -327,11 +334,22 @@ function buildSchoolDniKey(colegio: string, dni: string | null | undefined): str
   return `${school}__dni__${normalizedDni}`;
 }
 
+function buildSchoolEmailKey(colegio: string, email: string | null | undefined): string | null {
+  const school = normalizeText(colegio);
+  const normalizedEmail = normalizeEmail(email);
+
+  if (!school || !normalizedEmail) return null;
+
+  return `${school}__email__${normalizedEmail}`;
+}
+
 function buildAdultMatchKeys(adulto: AdultoDetectado): string[] {
   const keys = new Set<string>();
   const dniKey = buildSchoolDniKey(adulto.colegio, adulto.dni);
+  const emailKey = buildSchoolEmailKey(adulto.colegio, adulto.email);
 
   if (dniKey) keys.add(dniKey);
+  if (emailKey) keys.add(emailKey);
 
   buildSchoolNameKeys(adulto.colegio, adulto.matchKey).forEach((key) => keys.add(key));
 
@@ -341,8 +359,10 @@ function buildAdultMatchKeys(adulto: AdultoDetectado): string[] {
 function buildEncuestaMatchKeys(encuesta: EncuestaDetectada): string[] {
   const keys = new Set<string>();
   const dniKey = buildSchoolDniKey(encuesta.colegio, encuesta.dni);
+  const emailKey = buildSchoolEmailKey(encuesta.colegio, encuesta.email);
 
   if (dniKey) keys.add(dniKey);
+  if (emailKey) keys.add(emailKey);
 
   buildSchoolNameKeys(encuesta.colegio, encuesta.matchKey).forEach((key) => keys.add(key));
 
@@ -371,6 +391,26 @@ function getEncuestaDni(row: Record<string, unknown>): string | null {
       "dni_madre",
       "DNI del padre",
       "DNI de la madre",
+    ]),
+  );
+}
+
+function getEncuestaEmail(row: Record<string, unknown>): string | null {
+  return normalizeEmail(
+    getDirectValue(row, [
+      "email",
+      "Email",
+      "E-mail",
+      "mail",
+      "Mail",
+      "correo",
+      "Correo",
+      "correo_electronico",
+      "Correo electrónico",
+      "Email del padre",
+      "Email de la madre",
+      "E-mail padre",
+      "E-mail madre",
     ]),
   );
 }
@@ -694,6 +734,9 @@ function getPadreDni(row: Record<string, unknown>): string | null {
       "Documento de identidad.1",
       "Documento de identidad_1",
       "Documento de identidad__1",
+      "D.N.I.",
+      "D.N.I_",
+      "D.N.I__",
       "D.N.I..1",
       "D.N.I._1",
       "D.N.I.__1",
@@ -713,6 +756,9 @@ function getMadreDni(row: Record<string, unknown>): string | null {
       "Documento de identidad.2",
       "Documento de identidad_2",
       "Documento de identidad__2",
+      "D.N.I..1",
+      "D.N.I._1",
+      "D.N.I.__1",
       "D.N.I..2",
       "D.N.I._2",
       "D.N.I.__2",
@@ -922,26 +968,277 @@ function dedupeAdults(adultos: AdultoDetectado[]): AdultoDetectado[] {
 
   return Array.from(map.values());
 }
+function indexAdultsByKey(
+  adultos: AdultoDetectado[],
+  keyGetter: (adulto: AdultoDetectado) => string[],
+): Map<string, AdultoDetectado[]> {
+  const index = new Map<string, AdultoDetectado[]>();
+
+  for (const adulto of adultos) {
+    for (const key of keyGetter(adulto)) {
+      if (!key) continue;
+      if (!index.has(key)) index.set(key, []);
+      index.get(key)!.push(adulto);
+    }
+  }
+
+  return index;
+}
+
+function buildExactSchoolNameKey(colegio: string, matchKey: string): string | null {
+  const school = normalizeText(colegio);
+  const name = normalizePersonNameKey(matchKey);
+  if (!school || !name) return null;
+  return `${school}__${name}`;
+}
+
+function removeLeadingMariaForCompare(value: string): string {
+  return normalizePersonNameKey(value).replace(/^maria\s+/, "").trim();
+}
+
+function nameTokensForCompare(value: string): string[] {
+  return normalizePersonNameKey(value)
+    .split(" ")
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3 && token !== "maria" && token !== "del" && token !== "los" && token !== "las");
+}
+
+function scoreNameCandidate(encuesta: EncuestaDetectada, adulto: AdultoDetectado): number {
+  const e = normalizePersonNameKey(encuesta.matchKey);
+  const a = normalizePersonNameKey(adulto.matchKey);
+  if (!e || !a) return 0;
+
+  if (e === a) return 100;
+
+  const eNoMaria = removeLeadingMariaForCompare(e);
+  const aNoMaria = removeLeadingMariaForCompare(a);
+  if (eNoMaria && aNoMaria && eNoMaria === aNoMaria) return 96;
+
+  const eTokens = nameTokensForCompare(e);
+  const aTokens = nameTokensForCompare(a);
+  if (eTokens.length < 2 || aTokens.length < 2) return 0;
+
+  const eSet = new Set(eTokens);
+  const aSet = new Set(aTokens);
+  const shared = eTokens.filter((token) => aSet.has(token));
+  const union = new Set([...eTokens, ...aTokens]);
+  const jaccard = union.size ? shared.length / union.size : 0;
+
+  const eAllInA = eTokens.every((token) => aSet.has(token));
+  const aAllInE = aTokens.every((token) => eSet.has(token));
+
+  // Nombre completo de un lado contenido en el otro. Ej: "Maria Victoria Serra" vs "Victoria Serra".
+  if ((eAllInA || aAllInE) && shared.length >= 2) return 88;
+
+  // Coincidencia fuerte por nombre/apellido, sin caer en variantes demasiado amplias.
+  if (shared.length >= 3 && jaccard >= 0.6) return 82;
+  if (shared.length >= 2 && jaccard >= 0.75) return 78;
+
+  return 0;
+}
+
 function compareAdultsWithEncuestas(
   adultos: AdultoDetectado[],
   encuestas: EncuestaDetectada[],
-): AdultoDetectado[] {
-  const encuestaMatchKeys = new Set(
-    encuestas
-      .flatMap((encuesta) => buildEncuestaMatchKeys(encuesta))
-      .filter(Boolean),
+): { adultos: AdultoDetectado[]; audit: MatchAudit } {
+  const adultosByUniqueKey = new Map<string, AdultoDetectado>(
+    adultos.map((adulto): [string, AdultoDetectado] => [
+      getAdultUniqueKey(adulto),
+      { ...adulto, respondio: false },
+    ]),
   );
 
-  return adultos.map((adulto) => {
-    const matchedBySchoolAndDniOrName = buildAdultMatchKeys(adulto).some((key) =>
-      encuestaMatchKeys.has(key),
+  const getCurrentAdult = (adulto: AdultoDetectado) =>
+    adultosByUniqueKey.get(getAdultUniqueKey(adulto)) || adulto;
+
+  const dniAdultIndex = indexAdultsByKey(adultos, (adulto) => {
+    const key = buildSchoolDniKey(adulto.colegio, adulto.dni);
+    return key ? [key] : [];
+  });
+
+  const emailAdultIndex = indexAdultsByKey(adultos, (adulto) => {
+    const key = buildSchoolEmailKey(adulto.colegio, adulto.email);
+    return key ? [key] : [];
+  });
+
+  // Índice exacto separado. Esto evita el bug que viste: al mezclar todas las variantes flexibles
+  // una respuesta real terminaba como "ambigua" aunque el nombre completo coincidiera perfecto.
+  const exactNameAdultIndex = indexAdultsByKey(adultos, (adulto) => {
+    const key = buildExactSchoolNameKey(adulto.colegio, adulto.matchKey);
+    return key ? [key] : [];
+  });
+
+  const nameAdultIndex = indexAdultsByKey(adultos, (adulto) =>
+    buildSchoolNameKeys(adulto.colegio, adulto.matchKey),
+  );
+
+  const linkedEncuestaIds = new Set<number>();
+  const linkedAdultKeys = new Set<string>();
+  const byEncuestaId = new Map<number, string>();
+
+  const uniqueCandidatesByAdult = (candidates: AdultoDetectado[]) =>
+    Array.from(
+      new Map(candidates.map((adulto) => [getAdultUniqueKey(adulto), adulto])).values(),
     );
 
-    return {
-      ...adulto,
-      respondio: matchedBySchoolAndDniOrName,
-    };
-  });
+  const identityKeyForNameMatch = (adulto: AdultoDetectado) => {
+    const school = normalizeText(adulto.colegio);
+    const name = normalizePersonNameKey(adulto.matchKey);
+    if (!school || !name) return "";
+    return `${school}__${adulto.rol}__${name}`;
+  };
+
+  const preferMostCompleteAdult = (candidates: AdultoDetectado[]) => {
+    return [...candidates].sort((a, b) => {
+      const score = (adulto: AdultoDetectado) =>
+        (adulto.dni ? 4 : 0) +
+        (adulto.email ? 2 : 0) +
+        (adulto.familiaKey ? 1 : 0);
+      return score(b) - score(a);
+    })[0];
+  };
+
+  const chooseSinglePersonCandidate = (candidates: AdultoDetectado[]) => {
+    const uniqueCandidates = uniqueCandidatesByAdult(candidates);
+    if (uniqueCandidates.length === 1) return uniqueCandidates[0];
+
+    // Caso real de tus Excel: el mismo adulto puede aparecer en una fila con DNI/email
+    // y en otra sin DNI/email. Eso generaba 2 claves técnicas distintas y caía como
+    // ambiguo, aunque era la misma persona: mismo colegio + mismo rol + mismo nombre.
+    const byPerson = new Map<string, AdultoDetectado[]>();
+    for (const adulto of uniqueCandidates) {
+      const key = identityKeyForNameMatch(adulto);
+      if (!key) continue;
+      if (!byPerson.has(key)) byPerson.set(key, []);
+      byPerson.get(key)!.push(adulto);
+    }
+
+    if (byPerson.size === 1) {
+      return preferMostCompleteAdult(Array.from(byPerson.values())[0]);
+    }
+
+    return null;
+  };
+
+  // Importante: NO filtramos adultos ya vinculados.
+  // Una misma persona puede aparecer varias veces en encuestas porque respondió por más de un hijo
+  // o porque QuestionPro exportó varias filas equivalentes. Esas respuestas deben figurar como
+  // "encuestas vinculadas", pero el adulto/familia se marca una sola vez como respondido.
+  // Si filtramos linkedAdultKeys, las respuestas repetidas caen como "ambiguas" y baja falso la participación.
+
+  const linkAdult = (
+    encuesta: EncuestaDetectada,
+    adulto: AdultoDetectado,
+    via: "dni" | "email" | "nombre" | "nombre_exacto" | "nombre_rankeado",
+  ) => {
+    const adultKey = getAdultUniqueKey(adulto);
+    const current = getCurrentAdult(adulto);
+
+    adultosByUniqueKey.set(adultKey, {
+      ...current,
+      respondio: true,
+    });
+
+    linkedEncuestaIds.add(encuesta.id);
+    linkedAdultKeys.add(adultKey);
+    byEncuestaId.set(encuesta.id, via);
+  };
+
+  const tryLinkUnique = (
+    encuesta: EncuestaDetectada,
+    candidates: AdultoDetectado[],
+    via: "dni" | "email" | "nombre" | "nombre_exacto",
+  ): boolean => {
+    const candidate = chooseSinglePersonCandidate(candidates);
+    if (!candidate) return false;
+    linkAdult(encuesta, candidate, via);
+    return true;
+  };
+
+  const tryLinkBestNameCandidate = (encuesta: EncuestaDetectada, candidates: AdultoDetectado[]) => {
+    const uniqueCandidates = uniqueCandidatesByAdult(candidates)
+      .map((adulto) => ({ adulto, score: scoreNameCandidate(encuesta, adulto) }))
+      .filter((item) => item.score >= 78)
+      .sort((a, b) => b.score - a.score);
+
+    if (!uniqueCandidates.length) return false;
+
+    const bestScore = uniqueCandidates[0].score;
+    const top = uniqueCandidates.filter((item) => item.score === bestScore);
+
+    // Si hay un único candidato claramente mejor, vinculamos.
+    if (top.length === 1) {
+      linkAdult(encuesta, top[0].adulto, "nombre_rankeado");
+      return true;
+    }
+
+    // Si los candidatos empatados pertenecen a la misma familia y mismo rol, no es ambigüedad real.
+    const sameFamilyAndRole = new Set(
+      top.map((item) => `${item.adulto.familiaKey}__${item.adulto.rol}`),
+    );
+    if (sameFamilyAndRole.size === 1) {
+      linkAdult(encuesta, top[0].adulto, "nombre_rankeado");
+      return true;
+    }
+
+    // Otro caso real: mismo adulto duplicado técnicamente por tener DNI/email en una fila
+    // y no en otra. Si todos los empatados son la misma persona por colegio+rol+nombre, vinculamos.
+    const samePersonByNameAndRole = new Set(top.map((item) => identityKeyForNameMatch(item.adulto)));
+    if (samePersonByNameAndRole.size === 1 && !samePersonByNameAndRole.has("")) {
+      linkAdult(encuesta, preferMostCompleteAdult(top.map((item) => item.adulto)), "nombre_rankeado");
+      return true;
+    }
+
+    // V5: último desempate controlado.
+    // En la práctica, muchas respuestas restantes tienen el mismo adulto repetido en el padrón
+    // con pequeñas diferencias de fila/familia por hijos. Si el mejor puntaje es muy alto
+    // y todos los candidatos empatados son del mismo rol, vincular al registro más completo
+    // evita dejar respuestas reales afuera sin volver a inflar madres/padres.
+    const sameRole = new Set(top.map((item) => item.adulto.rol));
+    if (bestScore >= 88 && sameRole.size === 1) {
+      linkAdult(encuesta, preferMostCompleteAdult(top.map((item) => item.adulto)), "nombre_rankeado");
+      return true;
+    }
+
+    // Si no es una coincidencia casi exacta, mantenemos el criterio conservador.
+    return false;
+  };
+
+  for (const encuesta of encuestas) {
+    const dniKey = buildSchoolDniKey(encuesta.colegio, encuesta.dni);
+    if (dniKey && tryLinkUnique(encuesta, dniAdultIndex.get(dniKey) || [], "dni")) continue;
+
+    const emailKey = buildSchoolEmailKey(encuesta.colegio, encuesta.email);
+    if (emailKey && tryLinkUnique(encuesta, emailAdultIndex.get(emailKey) || [], "email")) continue;
+
+    const exactNameKey = buildExactSchoolNameKey(encuesta.colegio, encuesta.matchKey);
+    if (exactNameKey && tryLinkUnique(encuesta, exactNameAdultIndex.get(exactNameKey) || [], "nombre_exacto")) continue;
+
+    const encuestaNoMaria = removeLeadingMariaForCompare(encuesta.matchKey);
+    const mariaLessCandidates = encuestaNoMaria
+      ? adultos.filter(
+          (adulto) =>
+            normalizeText(adulto.colegio) === normalizeText(encuesta.colegio) &&
+            removeLeadingMariaForCompare(adulto.matchKey) === encuestaNoMaria,
+        )
+      : [];
+    if (mariaLessCandidates.length && tryLinkUnique(encuesta, mariaLessCandidates, "nombre_exacto")) continue;
+
+    const nameCandidates = buildSchoolNameKeys(encuesta.colegio, encuesta.matchKey).flatMap(
+      (key) => nameAdultIndex.get(key) || [],
+    );
+
+    tryLinkBestNameCandidate(encuesta, nameCandidates);
+  }
+
+  return {
+    adultos: Array.from(adultosByUniqueKey.values()),
+    audit: {
+      linkedEncuestaIds,
+      linkedAdultKeys,
+      byEncuestaId,
+    },
+  };
 }
 
 function buildFamilySummary(adultos: AdultoDetectado[]) {
@@ -1161,6 +1458,7 @@ function buildDiagnostics(
   adultosUnicos: AdultoDetectado[],
   adultosComparados: AdultoDetectado[],
   encuestas: EncuestaDetectada[],
+  matchAudit: MatchAudit,
 ) {
   const adultosKeys = new Set(
     adultosUnicos
@@ -1168,18 +1466,8 @@ function buildDiagnostics(
       .filter(Boolean),
   );
 
-  const adultosRespondidosKeys = new Set(
-    adultosComparados
-      .filter((adulto) => adulto.respondio)
-      .flatMap((adulto) => buildAdultMatchKeys(adulto))
-      .filter(Boolean),
-  );
-
   const encuestasSinVincular = encuestas
-    .filter((encuesta) =>
-      buildEncuestaMatchKeys(encuesta).length > 0 &&
-      !buildEncuestaMatchKeys(encuesta).some((key) => adultosKeys.has(key)),
-    )
+    .filter((encuesta) => !matchAudit.linkedEncuestaIds.has(encuesta.id))
     .map((encuesta) => ({
       id: encuesta.id,
       colegio: encuesta.colegio,
@@ -1191,11 +1479,13 @@ function buildDiagnostics(
       score: encuesta.score,
       matchKey: encuesta.matchKey,
       schoolMatchKey: encuesta.schoolMatchKey,
-      motivo: "No se encontró un adulto del padrón con mismo colegio + DNI o nombre/apellido.",
+      motivo: buildEncuestaMatchKeys(encuesta).some((key) => adultosKeys.has(key))
+        ? "Coincidencia posible pero ambigua: no se asignó para evitar contar de más."
+        : "No se encontró un adulto del padrón con mismo colegio + DNI, email o nombre/apellido único.",
     }));
 
   const encuestasVinculadas = encuestas.filter((encuesta) =>
-    buildEncuestaMatchKeys(encuesta).some((key) => adultosRespondidosKeys.has(key)),
+    matchAudit.linkedEncuestaIds.has(encuesta.id),
   );
 
   const adultosRawMap = new Map<
@@ -1324,9 +1614,7 @@ function buildDiagnostics(
     // calcular encuestasVinculadas/encuestasSinVincular. Antes esta tabla usaba
     // encuesta.schoolMatchKey exacto y por eso mostraba falsos sin vincular,
     // especialmente en Jardines 2024 (Los Senderos, Crisol, Cerritos, Cauquén).
-    const linkedByFlexibleKey = buildEncuestaMatchKeys(encuesta).some((key) =>
-      adultosRespondidosKeys.has(key),
-    );
+    const linkedByFlexibleKey = matchAudit.linkedEncuestaIds.has(encuesta.id);
 
     if (linkedByFlexibleKey) {
       item.encuestasVinculadas += 1;
@@ -1441,6 +1729,7 @@ export async function POST(req: Request) {
       const apellido = cleanText(row.apellido);
       const fullName = `${nombre} ${apellido}`.replace(/\s+/g, " ").trim();
       const dni = getEncuestaDni(row);
+      const email = getEncuestaEmail(row);
       const matchKey = makeFullNameKey(fullName);
 
       return {
@@ -1451,6 +1740,7 @@ export async function POST(req: Request) {
         apellido,
         fullName,
         dni,
+        email,
         matchKey,
         schoolMatchKey: `${normalizeText(colegio)}__${matchKey}`,
         score: row.score === null || row.score === undefined ? null : Number(row.score),
@@ -1600,7 +1890,9 @@ export async function POST(req: Request) {
     }
 
     const adultosUnicos = dedupeAdults(adultosExcel);
-    const adultosComparados = compareAdultsWithEncuestas(adultosUnicos, encuestas);
+    const comparacionAdultos = compareAdultsWithEncuestas(adultosUnicos, encuestas);
+    const adultosComparados = comparacionAdultos.adultos;
+    const matchAudit = comparacionAdultos.audit;
     const participacion = buildFamilySummary(adultosComparados);
     let hijosPorColegio = buildChildrenCompositionBySchool(adultosExcel);
 
@@ -1720,7 +2012,7 @@ if (group === "varones" && normalizeText(projectName).includes("2025")) {
         hijosPorFamilia,
       };
     });
-    const diagnostico = buildDiagnostics(adultosExcel, adultosUnicos, adultosComparados, encuestas);
+    const diagnostico = buildDiagnostics(adultosExcel, adultosUnicos, adultosComparados, encuestas, matchAudit);
 
     const encuestasSinNombre = encuestas.filter((encuesta) => !encuesta.matchKey).length;
     const encuestasConNombre = encuestas.filter((encuesta) => Boolean(encuesta.matchKey)).length;
@@ -1745,6 +2037,19 @@ if (group === "varones" && normalizeText(projectName).includes("2025")) {
 
     if (encuestasSinNombre > 0) {
       recomendaciones.push("Hay encuestas sin nombre/apellido; esas respuestas no se pueden cruzar por persona.");
+    }
+
+    if (participacion.resumen.familiasConRespuesta > encuestas.length) {
+      recomendaciones.push(
+        "Control crítico: las familias con respuesta superan las encuestas cargadas. Revisar matching antes de presentar.",
+      );
+    }
+
+    const adultosRespondieronDetectados = adultosComparados.filter((adulto) => adulto.respondio).length;
+    if (adultosRespondieronDetectados > matchAudit.linkedEncuestaIds.size) {
+      recomendaciones.push(
+        "Control crítico: hay más adultos respondidos que encuestas vinculadas. El matching está inflando resultados.",
+      );
     }
 
     if (recomendaciones.length === 0) {
@@ -1774,7 +2079,7 @@ if (group === "varones" && normalizeText(projectName).includes("2025")) {
         encuestasSinNombre,
         totalAdultosPadron: adultosUnicos.length,
         totalAdultosPadronSinDeduplicar: adultosExcel.length,
-        adultosRespondieronDetectados: adultosComparados.filter((adulto) => adulto.respondio).length,
+        adultosRespondieronDetectados,
         madresEnPadron: adultosComparados.filter((adulto) => adulto.rol === "madre").length,
         padresEnPadron: adultosComparados.filter((adulto) => adulto.rol === "padre").length,
         ...participacion.resumen,

@@ -39,7 +39,7 @@ import TeamDashboard from "../../../components/TeamDashboard";
 type ViewMode = "director" | "team";
 type DirectorTopic = "Promotor" | "Satisfecho" | "Insatisfecho";
 type FilterType = "Todos" | "Promotor" | "Satisfecho" | "Insatisfecho";
-type UserRole = "admin" | "director" | "equipo" | "other";
+type UserRole = "admin" | "director" | "equipo" | "oficina" | "other";
 
 export type SurveyRow = {
   id: string;
@@ -64,6 +64,8 @@ export type SurveyRow = {
   year: number;
   projectId?: string;
   projectName?: string;
+  anonFamilyKey?: string;
+  anonCompositeKey?: string;
 };
 
 // ─────────────────────────────────────────────
@@ -207,9 +209,11 @@ function ViewModeSwitch({ viewMode, setViewMode }: { viewMode: ViewMode; setView
 }
 
 const getUserRole = (rawRole: unknown): UserRole => {
-  if (rawRole === "admin") return "admin";
-  if (rawRole === "director") return "director";
-  if (rawRole === "equipo") return "equipo";
+  const role = String(rawRole ?? "").trim().toLowerCase();
+  if (role === "admin") return "admin";
+  if (role === "director") return "director";
+  if (role === "equipo") return "equipo";
+  if (role === "oficina") return "oficina";
   return "other";
 };
 
@@ -315,9 +319,10 @@ function AnalyticsDashboardLive() {
   const isAdmin = userRole === "admin";
   const isDirector = userRole === "director";
   const isTeam = userRole === "equipo";
-  const canChooseSchool = isAdmin;
+  const isOffice = userRole === "oficina";
+  const canChooseSchool = isAdmin || isTeam || isOffice;
   const canSwitchView = isAdmin;
-  const canViewTeam = isAdmin || isTeam;
+  const canViewTeam = isAdmin || isTeam || isOffice;
   const router = useRouter();
   const searchParams = useSearchParams();
   const projectId = searchParams.get("projectId") || "";
@@ -354,14 +359,17 @@ function AnalyticsDashboardLive() {
 
   useEffect(() => {
     if (isAdmin) return;
-    setViewMode(isTeam ? "team" : "director");
-  }, [isAdmin, isTeam]);
+    setViewMode(isTeam || isOffice ? "team" : "director");
+  }, [isAdmin, isTeam, isOffice]);
 
   useEffect(() => {
+    // Solo Director queda fijo al colegio asignado.
+    // Equipo y Oficina central eligen colegio igual que Admin.
+    if (isTeam || isOffice) return;
     if (scopedFilters.colegio) {
       setActiveSchool(scopedFilters.colegio);
     }
-  }, [scopedFilters.colegio]);
+  }, [scopedFilters.colegio, isTeam, isOffice]);
 
   useEffect(() => {
     if (!projectId) return;
@@ -559,6 +567,8 @@ function AnalyticsDashboardLive() {
             score, type: score >= 9 ? "Promotor" : score >= 7 ? "Satisfecho" : "Insatisfecho",
             positive, improvement, positiveTags: [], improvementTags: [],
             risk, riskLevel, riskWords, sentiment: sentimentLabel, sentimentScore, year,
+            anonFamilyKey: String((item as any).anonFamilyKey ?? ""),
+            anonCompositeKey: String((item as any).anonCompositeKey ?? ""),
           };
         });
 
@@ -572,11 +582,11 @@ function AnalyticsDashboardLive() {
         });
 
         let uniqueSchools = Array.from(map.values()).sort();
-        if (scopedFilters.colegio) {
+        if (scopedFilters.colegio && !isTeam && !isOffice) {
           uniqueSchools = uniqueSchools.filter((c) => normalize(c) === normalize(scopedFilters.colegio));
         }
         setColegiosSurvey(["Todos los colegios", ...uniqueSchools]);
-        if (scopedFilters.colegio) setActiveSchool(scopedFilters.colegio);
+        if (scopedFilters.colegio && !isTeam && !isOffice) setActiveSchool(scopedFilters.colegio);
       } catch (error) {
         if (!cancelled) console.error("Error cargando:", error);
       } finally {
@@ -589,7 +599,7 @@ function AnalyticsDashboardLive() {
     return () => {
       cancelled = true;
     };
-  }, [projectId, scopedFilters.colegio, isAdmin]);
+  }, [projectId, scopedFilters.colegio, isAdmin, isTeam, isOffice]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -687,6 +697,8 @@ function AnalyticsDashboardLive() {
               year: sourceProjectYear ?? (!isNaN(dt.getTime()) ? dt.getFullYear() : new Date().getFullYear()),
               projectId: sourceProjectId,
               projectName: sourceProjectName,
+              anonFamilyKey: String((item as any).anonFamilyKey ?? ""),
+              anonCompositeKey: String((item as any).anonCompositeKey ?? ""),
             } as SurveyRow;
           });
         });
@@ -772,15 +784,26 @@ function AnalyticsDashboardLive() {
   const directorStats = stats;
 
   const npsComparisonRows = useMemo(() => {
-    if (connectedRows.length === 0) return stats.schoolData;
-    // Histórico debe considerar todos los proyectos visibles del perfil.
-    return [...stats.schoolData, ...connectedRows];
-  }, [connectedRows, stats.schoolData]);
+    // IMPORTANTE:
+    // Para el NPS comparado no usamos stats.schoolData porque stats ya viene
+    // filtrado por el colegio seleccionado. Si Oficina/Admin elige un colegio,
+    // necesitamos seguir teniendo todo el proyecto actual para poder armar:
+    // - NPS Polo: colegio seleccionado + colegios del mismo polo.
+    // - NPS Históricos: años/proyectos vinculados filtrados por ese colegio.
+    // Usar encuestas evita que el gráfico quede con una sola barra.
+    if (connectedRows.length === 0) return encuestas;
+    return [...encuestas, ...connectedRows];
+  }, [connectedRows, encuestas]);
 
   const resolvedOwnPolo = useMemo(() => {
     if (scopedFilters.polo) return scopedFilters.polo;
-    if (!scopedFilters.colegio) return undefined;
-    const targetSchool = schoolCanonicalKey(scopedFilters.colegio);
+
+    // Director usa el colegio asignado. Oficina/Equipo no tienen colegio fijo,
+    // así que cuando eligen un colegio usamos ese colegio activo para calcular el polo.
+    const schoolForPolo = scopedFilters.colegio || (activeSchool !== "Todos los colegios" ? activeSchool : "");
+    if (!schoolForPolo) return undefined;
+
+    const targetSchool = schoolCanonicalKey(schoolForPolo);
     if (!targetSchool) return undefined;
 
     const matched = npsComparisonRows.find((row) => {
@@ -790,13 +813,22 @@ function AnalyticsDashboardLive() {
 
     const polo = String(matched?.polo ?? "").trim();
     return polo || undefined;
-  }, [scopedFilters.polo, scopedFilters.colegio, npsComparisonRows]);
+  }, [scopedFilters.polo, scopedFilters.colegio, activeSchool, npsComparisonRows]);
 
   const filteredResponses = useMemo(() => {
     return stats.schoolData
       .filter((r) => {
         const sl = normalize(searchTerm);
-        const matchSearch = !sl || normalize(r.positive).includes(sl) || normalize(r.improvement).includes(sl);
+        const matchSearch =
+          !sl ||
+          normalize(r.nombre).includes(sl) ||
+          normalize(r.apellido).includes(sl) ||
+          normalize(`${r.nombre} ${r.apellido}`).includes(sl) ||
+          normalize(r.colegio).includes(sl) ||
+          normalize(r.curso).includes(sl) ||
+          normalize(r.polo).includes(sl) ||
+          normalize(r.positive).includes(sl) ||
+          normalize(r.improvement).includes(sl);
         let matchType = true;
         if (filterType === "Promotor") matchType = r.type === "Promotor";
         else if (filterType === "Satisfecho") matchType = r.type === "Satisfecho";
@@ -891,7 +923,7 @@ function AnalyticsDashboardLive() {
             ) : (
               <div className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-sm font-black ${schoolTheme.ring} ${schoolTheme.bg} ${schoolTheme.text}`}>
                 <Buildings size={16} />
-                <span>{scopedFilters.colegio || (isDirector || isTeam ? "Colegio asignado por admin" : activeSchool)}</span>
+                <span>{isOffice ? "Oficina central" : isTeam ? "Equipo" : scopedFilters.colegio || (isDirector ? "Colegio asignado por admin" : activeSchool)}</span>
               </div>
             )}
           </div>
@@ -940,7 +972,7 @@ function AnalyticsDashboardLive() {
             <ViewModeSwitch viewMode={viewMode} setViewMode={setViewMode} />
           ) : (
             <div className="rounded-2xl bg-slate-100 px-4 py-2 text-xs font-black uppercase tracking-widest text-slate-500">
-              {isDirector ? "Perfil Dirección" : "Perfil Equipo"}
+              {isOffice ? "Perfil Oficina central" : isDirector ? "Perfil Dirección" : "Perfil Equipo"}
             </div>
           )}
         </div>
@@ -988,7 +1020,7 @@ function AnalyticsDashboardLive() {
             canEditThemes={isAdmin}
             projectId={projectId}
             currentProjectName={projectName}
-            ownSchool={scopedFilters.colegio}
+            ownSchool={isOffice || isTeam ? undefined : scopedFilters.colegio}
             ownPolo={resolvedOwnPolo}
             allowedCompareProjectIds={effectiveCompareProjectIds}
             npsLoading={connectedRowsLoading}
@@ -1007,6 +1039,7 @@ function AnalyticsDashboardLive() {
             projectId={projectId}
             activeSchool={activeSchool}
             canEditConfig={isAdmin}
+            anonymizePeople={isOffice}
           />
         )}
       </main>
@@ -1035,9 +1068,9 @@ function AnalyticsDashboardLive() {
               </div>
             )}
 
-            <div className={`mb-4 grid gap-3 ${isDirector ? "grid-cols-1" : "grid-cols-2"}`}>
+            <div className={`mb-4 grid gap-3 ${isDirector || isOffice ? "grid-cols-1" : "grid-cols-2"}`}>
               <Link href={`/dashboard/analytics?projectId=${projectId}`} onClick={() => setIsMenuOpen(false)} className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white p-5 text-sm font-black text-slate-700 shadow-sm transition-all hover:bg-slate-50 hover:text-indigo-600 hover:border-indigo-200"><ChartBar size={24} weight="fill" className="text-indigo-500" /> Analítica Avanzada</Link>
-              {!isDirector && (
+              {!isDirector && !isOffice && (
                 <Link href={`/dashboard/reports?projectId=${projectId}`} onClick={() => setIsMenuOpen(false)} className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white p-5 text-sm font-black text-slate-700 shadow-sm transition-all hover:bg-slate-50 hover:text-red-600 hover:border-red-200"><FilePdf size={24} weight="fill" className="text-red-500" /> Generar Informes</Link>
               )}
             </div>
