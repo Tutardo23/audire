@@ -645,7 +645,7 @@ export default function DashboardHubPage() {
           {/* ────────────────────────────────────────────────────── */}
         </div>
 
-        {(isDirector || isPoleDirector) && (
+        {(isAdmin || isDirector || isPoleDirector) && (
           <div className="mb-5 flex justify-start">
             <Link
               href="/dashboard/materiales"
