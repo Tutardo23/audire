@@ -39,7 +39,7 @@ import TeamDashboard from "../../../components/TeamDashboard";
 type ViewMode = "director" | "team";
 type DirectorTopic = "Promotor" | "Satisfecho" | "Insatisfecho";
 type FilterType = "Todos" | "Promotor" | "Satisfecho" | "Insatisfecho";
-type UserRole = "admin" | "director" | "equipo" | "oficina" | "other";
+type UserRole = "admin" | "director" | "director_polo" | "equipo" | "oficina" | "other";
 
 export type SurveyRow = {
   id: string;
@@ -83,6 +83,29 @@ const schoolCanonicalKey = (value?: string | null) =>
     .replace(/^((colegio|jardin)\s+)+/, "")
     .replace(/\s+/g, " ")
     .trim();
+
+const canonicalPoloName = (value?: string | null) => {
+  const text = normalize(value)
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (text === "bueno aires" || text === "buenos aire" || text === "buenos aires") return "buenos aires";
+  if (text === "cordoba") return "cordoba";
+  if (text === "tucuman") return "tucuman";
+  if (text === "mendoza") return "mendoza";
+  if (text === "rosario") return "rosario";
+  if (text === "pilar") return "pilar";
+  if (text === "la plata" || text === "plata") return "la plata";
+  return text;
+};
+
+const matchesPoloName = (a?: string | null, b?: string | null) => {
+  const left = canonicalPoloName(a);
+  const right = canonicalPoloName(b);
+  if (!left || !right) return false;
+  return left === right || left.includes(right) || right.includes(left);
+};
 
 const extraerAnioONull = (titulo?: string | null) => {
   const match = String(titulo ?? "").match(/\b(20\d{2})\b/);
@@ -212,6 +235,7 @@ const getUserRole = (rawRole: unknown): UserRole => {
   const role = String(rawRole ?? "").trim().toLowerCase();
   if (role === "admin") return "admin";
   if (role === "director") return "director";
+  if (["director_polo", "director-polo", "director de polo", "director polo"].includes(role)) return "director_polo";
   if (role === "equipo") return "equipo";
   if (role === "oficina") return "oficina";
   return "other";
@@ -318,14 +342,16 @@ function AnalyticsDashboardLive() {
   const scopedFilters = getScopedFilters(user?.publicMetadata as Record<string, unknown> | undefined);
   const isAdmin = userRole === "admin";
   const isDirector = userRole === "director";
+  const isPoleDirector = userRole === "director_polo";
   const isTeam = userRole === "equipo";
   const isOffice = userRole === "oficina";
-  const canChooseSchool = isAdmin || isTeam || isOffice;
+  const canChooseSchool = isAdmin || isTeam || isOffice || isPoleDirector;
   const canSwitchView = isAdmin;
   const canViewTeam = isAdmin || isTeam || isOffice;
   const router = useRouter();
   const searchParams = useSearchParams();
   const projectId = searchParams.get("projectId") || "";
+  const schoolParam = searchParams.get("school") || "";
 
   const [directorCommentLimit, setDirectorCommentLimit] = useState<number>(20); 
   const [directorTopic, setDirectorTopic] = useState<DirectorTopic>("Satisfecho");
@@ -365,11 +391,11 @@ function AnalyticsDashboardLive() {
   useEffect(() => {
     // Solo Director queda fijo al colegio asignado.
     // Equipo y Oficina central eligen colegio igual que Admin.
-    if (isTeam || isOffice) return;
+    if (isTeam || isOffice || isPoleDirector) return;
     if (scopedFilters.colegio) {
       setActiveSchool(scopedFilters.colegio);
     }
-  }, [scopedFilters.colegio, isTeam, isOffice]);
+  }, [scopedFilters.colegio, isTeam, isOffice, isPoleDirector]);
 
   useEffect(() => {
     if (!projectId) return;
@@ -554,9 +580,13 @@ function AnalyticsDashboardLive() {
           };
         });
 
-        setEncuestas(enriched);
+        const enrichedForView = isPoleDirector && scopedFilters.polo
+          ? enriched.filter((row) => matchesPoloName(row.polo, scopedFilters.polo))
+          : enriched;
+
+        setEncuestas(enrichedForView);
         const map = new Map<string, string>();
-        enriched.forEach((item) => {
+        enrichedForView.forEach((item) => {
           const raw = item.colegio.trim();
           if (!raw) return;
           const key = schoolCanonicalKey(raw);
@@ -564,11 +594,23 @@ function AnalyticsDashboardLive() {
         });
 
         let uniqueSchools = Array.from(map.values()).sort();
-        if (scopedFilters.colegio && !isTeam && !isOffice) {
+        if (scopedFilters.colegio && !isTeam && !isOffice && !isPoleDirector) {
           uniqueSchools = uniqueSchools.filter((c) => normalize(c) === normalize(scopedFilters.colegio));
         }
-        setColegiosSurvey(["Todos los colegios", ...uniqueSchools]);
-        if (scopedFilters.colegio && !isTeam && !isOffice) setActiveSchool(scopedFilters.colegio);
+
+        const nextOptions = ["Todos los colegios", ...uniqueSchools];
+        setColegiosSurvey(nextOptions);
+
+        const requestedSchool = String(schoolParam || "").trim();
+        const requestedExists = requestedSchool && uniqueSchools.some((school) => schoolCanonicalKey(school) === schoolCanonicalKey(requestedSchool));
+
+        if (requestedExists) {
+          setActiveSchool(requestedSchool);
+        } else if (scopedFilters.colegio && !isTeam && !isOffice && !isPoleDirector) {
+          setActiveSchool(scopedFilters.colegio);
+        } else if (isPoleDirector && !requestedSchool) {
+          setActiveSchool("Todos los colegios");
+        }
       } catch (error) {
         if (!cancelled) console.error("Error cargando:", error);
       } finally {
@@ -581,7 +623,7 @@ function AnalyticsDashboardLive() {
     return () => {
       cancelled = true;
     };
-  }, [projectId, scopedFilters.colegio, isAdmin, isTeam, isOffice]);
+  }, [projectId, scopedFilters.colegio, scopedFilters.polo, isAdmin, isTeam, isOffice, isPoleDirector, schoolParam]);
 
   useEffect(() => {
     let cancelled = false;
@@ -738,8 +780,12 @@ function AnalyticsDashboardLive() {
           });
         });
 
-        setConnectedRows(rows);
-        writeConnectedRowsCache(projectId, effectiveCompareProjectIdsKey, rows);
+        const scopedConnectedRows = isPoleDirector && scopedFilters.polo
+          ? rows.filter((row) => matchesPoloName(row.polo, scopedFilters.polo))
+          : rows;
+
+        setConnectedRows(scopedConnectedRows);
+        writeConnectedRowsCache(projectId, effectiveCompareProjectIdsKey, scopedConnectedRows);
       } catch {
         if (!cancelled) setConnectedRows([]);
       } finally {
@@ -751,7 +797,7 @@ function AnalyticsDashboardLive() {
     return () => {
       cancelled = true;
     };
-  }, [effectiveViewMode, effectiveCompareProjectIdsKey, allProjects, projectId]);
+  }, [effectiveViewMode, effectiveCompareProjectIdsKey, allProjects, projectId, isPoleDirector, scopedFilters.polo]);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!projectId) { router.push("/dashboard"); return; }
@@ -958,7 +1004,7 @@ function AnalyticsDashboardLive() {
             ) : (
               <div className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-sm font-black ${schoolTheme.ring} ${schoolTheme.bg} ${schoolTheme.text}`}>
                 <Buildings size={16} />
-                <span>{isOffice ? "Oficina central" : isTeam ? "Equipo" : scopedFilters.colegio || (isDirector ? "Colegio asignado por admin" : activeSchool)}</span>
+                <span>{isOffice ? "Oficina central" : isTeam ? "Equipo" : isPoleDirector ? `Director de Polo${scopedFilters.polo ? ` ${scopedFilters.polo}` : ""}` : scopedFilters.colegio || (isDirector ? "Colegio asignado por admin" : activeSchool)}</span>
               </div>
             )}
           </div>
@@ -1055,8 +1101,9 @@ function AnalyticsDashboardLive() {
             canEditThemes={isAdmin}
             projectId={projectId}
             currentProjectName={projectName}
-            ownSchool={isOffice || isTeam ? undefined : scopedFilters.colegio}
+            ownSchool={isOffice || isTeam || isPoleDirector ? undefined : scopedFilters.colegio}
             ownPolo={resolvedOwnPolo}
+            isPoleDirector={isPoleDirector}
             allowedCompareProjectIds={effectiveCompareProjectIds}
             npsLoading={connectedRowsLoading}
           />

@@ -26,6 +26,8 @@ import {
   obtenerConfiguracionEquipoProyectoDB,
   guardarConfiguracionEquipoProyectoDB,
   obtenerFamiliasCompartidasProyectoDB,
+  listarProyectosDB,
+  copiarTemasDesdeProyectoDB,
 } from "../app/actions";
 
 // ─────────────────────────────────────────────
@@ -1129,6 +1131,7 @@ export default function TeamDashboard({
   const [teamSettingsHydrated, setTeamSettingsHydrated] = useState(false);
   const [syncingProjectConfig, setSyncingProjectConfig] = useState(false);
   const [syncMessage, setSyncMessage] = useState("");
+  const [copyVarones2025Loading, setCopyVarones2025Loading] = useState(false);
   const skipNextThemeSaveRef = useRef(false);
   const skipNextTeamSettingsSaveRef = useRef(false);
   const lastSavedCategoriesKeyRef = useRef<string>(categoriesKey(DEFAULT_RADAR_CATEGORIES));
@@ -1416,6 +1419,53 @@ export default function TeamDashboard({
       setThemesHydrated(true);
       setTeamSettingsHydrated(true);
       if (showMessage) setSyncingProjectConfig(false);
+    }
+  };
+
+
+  const copyVarones2025ThemesToCurrentProject = async () => {
+    if (!canEditConfig || !projectId || copyVarones2025Loading) return;
+
+    const confirmed = window.confirm(
+      "Esto va a reemplazar las categorías de este proyecto con las categorías de Varones 2025.\n\nUsalo solo para corregir Mujeres 2025. ¿Confirmás?"
+    );
+
+    if (!confirmed) return;
+
+    setCopyVarones2025Loading(true);
+    setSyncMessage("Buscando Varones 2025...");
+
+    try {
+      const projectsResult = await listarProyectosDB();
+      const projects = Array.isArray(projectsResult) ? projectsResult : (projectsResult as any)?.rows || [];
+      const sourceProject = projects.find((project: any) => {
+        const name = normalize(String(project?.nombre || ""));
+        return name.includes("varon") && name.includes("2025");
+      });
+
+      if (!sourceProject?.id) {
+        setSyncMessage("No encontré el proyecto Varones 2025 para copiar categorías.");
+        return;
+      }
+
+      const result = await copiarTemasDesdeProyectoDB(projectId, String(sourceProject.id));
+      const mapped = mapThemesToCategories((result as any)?.themes);
+
+      if (mapped.length === 0) {
+        setSyncMessage("Varones 2025 no tiene categorías guardadas para copiar.");
+        return;
+      }
+
+      const nextKey = categoriesKey(mapped);
+      lastSavedCategoriesKeyRef.current = nextKey;
+      skipNextThemeSaveRef.current = true;
+      setCustomCategories(mapped);
+      setActiveCategory(null);
+      setSyncMessage("Categorías copiadas desde Varones 2025 en este proyecto.");
+    } catch (error: any) {
+      setSyncMessage(error?.message || "No se pudieron copiar las categorías desde Varones 2025.");
+    } finally {
+      setCopyVarones2025Loading(false);
     }
   };
 
@@ -2127,6 +2177,13 @@ export default function TeamDashboard({
                 </button>
                 {canEditConfig && (
                   <>
+                    <button
+                      onClick={copyVarones2025ThemesToCurrentProject}
+                      disabled={!projectId || copyVarones2025Loading}
+                      className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-[10px] font-black uppercase tracking-widest text-amber-700 shadow-sm transition-all hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {copyVarones2025Loading ? "Copiando..." : "Copiar Varones 2025"}
+                    </button>
                     <button 
                       onClick={() => setIsCreatingCat(!isCreatingCat)} 
                       className="flex items-center gap-1 rounded-lg bg-white px-3 py-1.5 text-[10px] font-black uppercase tracking-widest text-blue-600 shadow-sm transition-all hover:bg-blue-600 hover:text-white"

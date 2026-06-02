@@ -78,13 +78,18 @@ const formatLogDate = (value: string) => {
 export default function DashboardHubPage() {
   const { user } = useUser();
   const isAdmin = user?.publicMetadata?.role === "admin";
-  const isDirector = user?.publicMetadata?.role === "director";
-  const isTeam = user?.publicMetadata?.role === "equipo";
+  const rawRole = String(user?.publicMetadata?.role ?? "").trim().toLowerCase();
+  const isDirector = rawRole === "director";
+  const isPoleDirector = ["director_polo", "director-polo", "director de polo", "director polo"].includes(rawRole);
+  const isTeam = rawRole === "equipo";
   const isOffice = user?.publicMetadata?.role === "oficina";
   const userSchool = String(
     user?.publicMetadata?.colegio ?? user?.publicMetadata?.school ?? "",
   ).trim();
-  const theme = schoolBrand(userSchool || "APDES");
+  const userPolo = String(
+    user?.publicMetadata?.polo ?? user?.publicMetadata?.region ?? "",
+  ).trim();
+  const theme = schoolBrand(userSchool || userPolo || "APDES");
   const schoolLogo = userSchool ? schoolLogoPath(userSchool) : "";
 
   const getProjectYear = (projectName: string) => {
@@ -92,14 +97,24 @@ export default function DashboardHubPage() {
     return match ? match[1] : "";
   };
 
-  const getVisibleProjectName = (project: Project) => {
+  const getVisibleProjectName = (project: Project, cardSchool?: string) => {
+    if (isPoleDirector && cardSchool) {
+      const year = getProjectYear(project.nombre);
+      return year ? `${cardSchool} ${year}` : cardSchool;
+    }
+
     if (!isDirector || !userSchool) return project.nombre;
 
     const year = getProjectYear(project.nombre);
     return year ? `${userSchool} ${year}` : userSchool;
   };
 
-  const getVisibleProjectDescription = (project: Project) => {
+  const getVisibleProjectDescription = (project: Project, cardSchool?: string) => {
+    if (isPoleDirector && cardSchool) {
+      const year = getProjectYear(project.nombre);
+      return year ? `Panel de ${cardSchool} ${year}` : `Panel de ${cardSchool}`;
+    }
+
     if (!isDirector || !userSchool) {
       return project.descripcion || "Espacio de trabajo sin descripción.";
     }
@@ -114,6 +129,51 @@ export default function DashboardHubPage() {
       .normalize("NFD")
       .replace(/[̀-ͯ]/g, "")
       .trim();
+
+  const canonicalPoloName = (value?: string | null) => {
+    const text = normalizeProjectName(String(value || ""))
+      .replace(/[^a-z0-9\s]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (text === "bueno aires" || text === "buenos aire" || text === "buenos aires") return "buenos aires";
+    if (text === "cordoba") return "cordoba";
+    if (text === "tucuman") return "tucuman";
+    if (text === "mendoza") return "mendoza";
+    if (text === "rosario") return "rosario";
+    if (text === "pilar") return "pilar";
+    if (text === "la plata" || text === "plata") return "la plata";
+    return text;
+  };
+
+  const POLO_SCHOOLS: Record<string, { varones: string; mujeres: string; jardines: string }> = {
+    "tucuman": { varones: "Colegio Pucará", mujeres: "Colegio Los Cerros", jardines: "Jardín Los Cerritos" },
+    "cordoba": { varones: "Colegio Cinco Ríos", mujeres: "Colegio El Torreón", jardines: "Jardín Torreón de los Ríos" },
+    "rosario": { varones: "Colegio Los Arroyos", mujeres: "Colegio Mirasoles", jardines: "Jardín Los Senderos" },
+    "buenos aires": { varones: "Colegio Los Molinos", mujeres: "Colegio El Buen Ayre", jardines: "Jardín Buen Molino" },
+    "mendoza": { varones: "Colegio Los Olivos", mujeres: "Colegio Portezuelo", jardines: "Jardín Platero" },
+    "la plata": { varones: "Bosque Del Plata", mujeres: "Colegio Crisol", jardines: "Jardín Crisol" },
+    "pilar": { varones: "Colegio Los Caminos", mujeres: "Los Candiles", jardines: "Jardín Cauquén" },
+  };
+
+  const getDirectorPoloSchoolForProject = (projectName: string) => {
+    const polo = canonicalPoloName(userPolo);
+    const schools = POLO_SCHOOLS[polo];
+    if (!schools) return "";
+    const group = getProjectGroup(projectName).key;
+    if (group === "varones") return schools.varones;
+    if (group === "mujeres") return schools.mujeres;
+    if (group === "jardines") return schools.jardines;
+    return "";
+  };
+
+  const getDirectorPoloGroup = (school: string) => ({
+    key: `polo-${normalizeProjectName(school).replace(/\s+/g, "-")}`,
+    label: school,
+    description: `Proyectos disponibles del Polo ${userPolo || "asignado"}.`,
+    badgeClass: "bg-blue-50 text-blue-700 border-blue-100",
+    headerClass: "from-blue-50 to-white border-blue-100",
+    order: 1,
+  });
 
   const getProjectGroup = (projectName: string) => {
     const name = normalizeProjectName(projectName);
@@ -335,7 +395,7 @@ export default function DashboardHubPage() {
   }, [isProfileOpen]);
 
   const sorted = useMemo(() => {
-    const shouldGroupProjects = isAdmin || isTeam || isOffice;
+    const shouldGroupProjects = isAdmin || isTeam || isOffice || isPoleDirector;
     if (!shouldGroupProjects) return projects;
 
     return [...projects].sort((a, b) => {
@@ -349,7 +409,29 @@ export default function DashboardHubPage() {
 
       return String(a.nombre || "").localeCompare(String(b.nombre || ""));
     });
-  }, [projects, isAdmin, isTeam, isOffice]);
+  }, [projects, isAdmin, isTeam, isOffice, isPoleDirector]);
+
+  const hubItems = useMemo(() => {
+    if (!isPoleDirector) {
+      return sorted.map((project) => ({
+        project,
+        school: "",
+        group: getProjectGroup(project.nombre),
+      }));
+    }
+
+    return sorted
+      .map((project) => {
+        const school = getDirectorPoloSchoolForProject(project.nombre);
+        if (!school) return null;
+        return {
+          project,
+          school,
+          group: getDirectorPoloGroup(school),
+        };
+      })
+      .filter(Boolean) as Array<{ project: Project; school: string; group: ReturnType<typeof getProjectGroup> }>;
+  }, [sorted, isPoleDirector, userPolo]);
 
   const handleCreate = async () => {
     const n = nombre.trim();
@@ -500,6 +582,10 @@ export default function DashboardHubPage() {
                 Elegí el año disponible para entrar al panel de tu colegio.
                 Primero revisá NPS general, participación familiar y comentarios.
               </p>
+            ) : isPoleDirector ? (
+              <p className="text-sm font-medium text-slate-500 max-w-2xl">
+                Acceso Director de Polo {userPolo ? userPolo : ""}: elegí el colegio y año disponible de tu polo para revisar NPS, participación y comentarios desde la vista Director.
+              </p>
             ) : isOffice ? (
               <p className="text-sm font-medium text-slate-500 max-w-2xl">
                 Acceso de oficina central: podés recorrer los proyectos asignados y elegir colegio dentro del panel para ver resultados, temas y comentarios sin nombres ni apellidos de familias.
@@ -559,6 +645,30 @@ export default function DashboardHubPage() {
           {/* ────────────────────────────────────────────────────── */}
         </div>
 
+        {(isDirector || isPoleDirector) && (
+          <div className="mb-5 flex justify-start">
+            <Link
+              href="/dashboard/materiales"
+              className="group inline-flex w-full max-w-[360px] items-center justify-between gap-3 rounded-2xl border border-blue-100 bg-white/90 px-4 py-3 shadow-sm shadow-blue-900/5 transition-all hover:-translate-y-0.5 hover:border-blue-200 hover:shadow-md active:scale-[0.99] sm:w-auto sm:min-w-[320px]"
+            >
+              <div className="flex min-w-0 items-center gap-3">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-50 text-blue-600">
+                  <Folder size={19} weight="fill" />
+                </div>
+                <div className="min-w-0 text-left">
+                  <p className="text-[9px] font-black uppercase tracking-widest text-blue-500">
+                    Materiales internos
+                  </p>
+                  <p className="truncate text-sm font-black text-slate-900">
+                    Documentos para directores
+                  </p>
+                </div>
+              </div>
+              <ArrowRight size={16} weight="bold" className="shrink-0 text-blue-600 transition-transform group-hover:translate-x-0.5" />
+            </Link>
+          </div>
+        )}
+
         {/* Banner modo comparar (SOLO VISIBLE PARA ADMINS) */}
         {isAdmin && compareMode && (
           <div className="mb-6 flex items-center gap-3 rounded-2xl border border-indigo-100 bg-indigo-50/80 px-5 py-3.5">
@@ -611,18 +721,17 @@ export default function DashboardHubPage() {
               </button>
             )}
 
-            {sorted.map((p, index) => {
+            {hubItems.map((item, index) => {
+              const p = item.project;
+              const cardSchool = item.school;
               const isSelected = selectedToCompare.includes(p.id);
               const isDisabled =
                 compareMode && selectedToCompare.length === 2 && !isSelected;
 
-              const currentGroup = getProjectGroup(p.nombre);
-              const previousGroup =
-                index > 0
-                  ? getProjectGroup(sorted[index - 1]?.nombre || "")
-                  : null;
+              const currentGroup = item.group;
+              const previousGroup = index > 0 ? hubItems[index - 1]?.group : null;
               const shouldShowAdminGroupHeader =
-                (isAdmin || isTeam || isOffice) &&
+                (isAdmin || isTeam || isOffice || isPoleDirector) &&
                 !compareMode &&
                 (!previousGroup || previousGroup.key !== currentGroup.key);
 
@@ -645,11 +754,7 @@ export default function DashboardHubPage() {
                           className={`w-fit rounded-full border px-3 py-1 text-[10px] font-black uppercase tracking-widest ${currentGroup.badgeClass}`}
                         >
                           {
-                            sorted.filter(
-                              (item) =>
-                                getProjectGroup(item.nombre).key ===
-                                currentGroup.key,
-                            ).length
+                            hubItems.filter((hubItem) => hubItem.group.key === currentGroup.key).length
                           }{" "}
                           proyectos
                         </span>
@@ -773,10 +878,10 @@ export default function DashboardHubPage() {
                             }}
                           />
                           <h4 className="font-display text-xl font-black tracking-tight text-slate-900 line-clamp-1">
-                            {getVisibleProjectName(p)}
+                            {getVisibleProjectName(p, cardSchool)}
                           </h4>
                           <p className="mt-1.5 text-xs font-medium text-slate-500 line-clamp-2">
-                            {getVisibleProjectDescription(p)}
+                            {getVisibleProjectDescription(p, cardSchool)}
                           </p>
                         </>
                       )}
@@ -794,7 +899,7 @@ export default function DashboardHubPage() {
                         </p>
                       ) : (
                         <Link
-                          href={`/dashboard/surveys?projectId=${p.id}`}
+                          href={`/dashboard/surveys?projectId=${p.id}${cardSchool ? `&school=${encodeURIComponent(cardSchool)}` : ""}`}
                           onClick={() => logProjectOpen(p)}
                           className="flex w-full items-center justify-between rounded-xl px-2 py-1 text-sm font-bold text-slate-600 transition-all hover:text-blue-600"
                         >

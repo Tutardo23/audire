@@ -12,7 +12,7 @@ type AdminUser = {
   nombre: string;
   firstName?: string;
   lastName?: string;
-  role: "admin" | "director" | "equipo" | "oficina" | "";
+  role: "admin" | "director" | "director_polo" | "equipo" | "oficina" | "";
   colegio: string;
   polo: string;
   projectIds: string[];
@@ -20,6 +20,19 @@ type AdminUser = {
 };
 
 type Project = { id: string; nombre: string };
+type UserRole = AdminUser["role"];
+
+const POLOS = ["Mendoza", "Rosario", "Pilar", "La Plata", "Buenos Aires", "Tucumán", "Córdoba"];
+
+const roleLabel = (role: UserRole) => {
+  if (role === "director_polo") return "Director de polo";
+  if (role === "director") return "Director";
+  if (role === "equipo") return "Equipo";
+  if (role === "oficina") return "Oficina central";
+  if (role === "admin") return "Admin";
+  return "sin rol";
+};
+
 
 export default function AdminAssignmentsPage() {
   const { user } = useUser();
@@ -34,7 +47,7 @@ export default function AdminAssignmentsPage() {
   const [newPassword, setNewPassword] = useState("");
   const [newFirstName, setNewFirstName] = useState("");
   const [newLastName, setNewLastName] = useState("");
-  const [newRole, setNewRole] = useState<"director" | "equipo" | "admin" | "oficina">("director");
+  const [newRole, setNewRole] = useState<"director" | "director_polo" | "equipo" | "admin" | "oficina">("director");
   const [newColegio, setNewColegio] = useState("");
   const [newPolo, setNewPolo] = useState("");
 
@@ -82,7 +95,10 @@ export default function AdminAssignmentsPage() {
         </div>
 
         <div className="mb-6 rounded-2xl border border-blue-100 bg-white p-4 shadow-sm">
-          <h2 className="text-sm font-black text-slate-900 mb-3">Crear cuenta (con contraseña)</h2>
+          <h2 className="text-sm font-black text-slate-900 mb-1">Crear cuenta (con contraseña)</h2>
+          <p className="mb-3 text-xs font-semibold text-slate-500">
+            Para Director de polo elegí el rol “Director de polo” y asigná solo el polo. El colegio queda vacío.
+          </p>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-2">
             <input value={newEmail} onChange={(e) => setNewEmail(e.target.value)} placeholder="email@colegio.com" className="rounded-xl border px-3 py-2 text-sm" />
             <input value={newPassword} onChange={(e) => setNewPassword(e.target.value)} type="password" placeholder="Contraseña inicial" className="rounded-xl border px-3 py-2 text-sm" />
@@ -90,18 +106,42 @@ export default function AdminAssignmentsPage() {
           <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
             <input value={newFirstName} onChange={(e) => setNewFirstName(e.target.value)} placeholder="Nombre" className="rounded-xl border px-3 py-2 text-sm" />
             <input value={newLastName} onChange={(e) => setNewLastName(e.target.value)} placeholder="Apellido" className="rounded-xl border px-3 py-2 text-sm" />
-            <select value={newRole} onChange={(e) => setNewRole(e.target.value as any)} className="rounded-xl border px-3 py-2 text-sm font-bold">
+            <select
+              value={newRole}
+              onChange={(e) => {
+                const role = e.target.value as typeof newRole;
+                setNewRole(role);
+                if (role === "director_polo") setNewColegio("");
+              }}
+              className="rounded-xl border px-3 py-2 text-sm font-bold"
+            >
               <option value="director">Director</option>
+              <option value="director_polo">Director de polo</option>
               <option value="equipo">Equipo</option>
               <option value="oficina">Oficina central</option>
               <option value="admin">Admin</option>
             </select>
-            <input value={newColegio} onChange={(e) => setNewColegio(e.target.value)} placeholder="Colegio" className="rounded-xl border px-3 py-2 text-sm" />
+            <input
+              value={newColegio}
+              onChange={(e) => setNewColegio(e.target.value)}
+              placeholder={newRole === "director_polo" ? "Colegio vacío para director de polo" : "Colegio"}
+              disabled={newRole === "director_polo"}
+              className="rounded-xl border px-3 py-2 text-sm disabled:bg-slate-100 disabled:text-slate-400"
+            />
           </div>
           <div className="mt-2 grid grid-cols-1 md:grid-cols-[1fr_auto] gap-2">
-            <input value={newPolo} onChange={(e) => setNewPolo(e.target.value)} placeholder="Polo" className="rounded-xl border px-3 py-2 text-sm" />
+            <select
+              value={newPolo}
+              onChange={(e) => setNewPolo(e.target.value)}
+              className="rounded-xl border px-3 py-2 text-sm"
+            >
+              <option value="">Elegí polo...</option>
+              {POLOS.map((polo) => (
+                <option key={polo} value={polo}>{polo}</option>
+              ))}
+            </select>
             <button
-              disabled={!newEmail || !newPassword || creating}
+              disabled={!newEmail || !newPassword || creating || (newRole === "director_polo" && !newPolo)}
               onClick={async () => {
                 setCreating(true);
                 try {
@@ -110,8 +150,8 @@ export default function AdminAssignmentsPage() {
                     password: newPassword,
                     firstName: newFirstName.trim() || undefined,
                     lastName: newLastName.trim() || undefined,
-                    role: newRole,
-                    colegio: newColegio.trim(),
+                    role: newRole as any,
+                    colegio: newRole === "director_polo" ? "" : newColegio.trim(),
                     polo: newPolo.trim(),
                   });
                   setNewEmail("");
@@ -146,7 +186,7 @@ export default function AdminAssignmentsPage() {
                   >
                     <div className="min-w-0">
                       <p className="truncate text-sm font-black text-slate-900">{u.nombre || "Sin nombre"}</p>
-                      <p className="truncate text-xs font-semibold text-slate-500">{u.email} · {u.role || "sin rol"}</p>
+                      <p className="truncate text-xs font-semibold text-slate-500">{u.email} · {roleLabel(u.role)}</p>
                     </div>
                     <CaretDown size={14} className={`shrink-0 text-slate-500 transition-transform ${isOpen ? "rotate-180" : ""}`} />
                   </button>
@@ -156,18 +196,53 @@ export default function AdminAssignmentsPage() {
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
                         <input value={u.firstName || ""} onChange={(e) => setUsers((prev) => prev.map((x) => x.id === u.id ? { ...x, firstName: e.target.value, nombre: `${e.target.value} ${x.lastName || ""}`.trim() } : x))} placeholder="Nombre" className="rounded-xl border px-3 py-2 text-xs" />
                         <input value={u.lastName || ""} onChange={(e) => setUsers((prev) => prev.map((x) => x.id === u.id ? { ...x, lastName: e.target.value, nombre: `${x.firstName || ""} ${e.target.value}`.trim() } : x))} placeholder="Apellido" className="rounded-xl border px-3 py-2 text-xs" />
-                        <select value={u.role || "equipo"} onChange={(e) => setUsers((prev) => prev.map((x) => x.id === u.id ? { ...x, role: e.target.value as any } : x))} className="rounded-xl border px-3 py-2 text-xs font-bold">
+                        <select
+                          value={u.role || "equipo"}
+                          onChange={(e) => {
+                            const role = e.target.value as AdminUser["role"];
+                            setUsers((prev) =>
+                              prev.map((x) =>
+                                x.id === u.id
+                                  ? { ...x, role, colegio: role === "director_polo" ? "" : x.colegio }
+                                  : x
+                              )
+                            );
+                          }}
+                          className="rounded-xl border px-3 py-2 text-xs font-bold"
+                        >
                           <option value="admin">Admin</option>
                           <option value="director">Director</option>
+                          <option value="director_polo">Director de polo</option>
                           <option value="equipo">Equipo</option>
                           <option value="oficina">Oficina central</option>
                         </select>
                       </div>
 
                       <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2">
-                        <input value={u.colegio} onChange={(e) => setUsers((prev) => prev.map((x) => x.id === u.id ? { ...x, colegio: e.target.value } : x))} placeholder="Colegio" className="rounded-xl border px-3 py-2 text-xs" />
-                        <input value={u.polo} onChange={(e) => setUsers((prev) => prev.map((x) => x.id === u.id ? { ...x, polo: e.target.value } : x))} placeholder="Polo" className="rounded-xl border px-3 py-2 text-xs" />
+                        <input
+                          value={u.colegio}
+                          onChange={(e) => setUsers((prev) => prev.map((x) => x.id === u.id ? { ...x, colegio: e.target.value } : x))}
+                          placeholder={u.role === "director_polo" ? "Colegio vacío para director de polo" : "Colegio"}
+                          disabled={u.role === "director_polo"}
+                          className="rounded-xl border px-3 py-2 text-xs disabled:bg-slate-100 disabled:text-slate-400"
+                        />
+                        <select
+                          value={u.polo}
+                          onChange={(e) => setUsers((prev) => prev.map((x) => x.id === u.id ? { ...x, polo: e.target.value } : x))}
+                          className="rounded-xl border px-3 py-2 text-xs"
+                        >
+                          <option value="">Elegí polo...</option>
+                          {POLOS.map((polo) => (
+                            <option key={polo} value={polo}>{polo}</option>
+                          ))}
+                        </select>
                       </div>
+
+                      {u.role === "director_polo" && (
+                        <div className="mt-3 rounded-xl border border-blue-100 bg-blue-50 px-3 py-2 text-xs font-bold text-blue-800">
+                          Director de polo: asigná el polo correspondiente y marcá los proyectos/años que podrá abrir. No hace falta colegio.
+                        </div>
+                      )}
 
                       <div className="mt-3 rounded-xl border border-slate-200 bg-white p-3">
                         <div className="mb-2 flex items-center justify-between gap-2">
@@ -269,7 +344,7 @@ export default function AdminAssignmentsPage() {
                             firstName: u.firstName,
                             lastName: u.lastName,
                             role: (u.role || "equipo") as any,
-                            colegio: u.colegio,
+                            colegio: u.role === "director_polo" ? "" : u.colegio,
                             polo: u.polo,
                             projectIds: u.projectIds,
                             compareProjectIds: u.compareProjectIds ?? [],

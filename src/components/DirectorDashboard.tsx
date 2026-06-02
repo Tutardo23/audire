@@ -44,6 +44,7 @@ import {
   obtenerTemasProyectoDB,
   guardarTemasProyectoDB,
   obtenerHistorialTemasProyectoDB,
+  copiarTemasDesdeProyectoDB,
   obtenerParticipacionFamiliarProyectoDB,
   obtenerFamiliasCompartidasProyectoDB,
 } from "../app/actions";
@@ -178,9 +179,9 @@ const normalizeSchoolForCompare = (value?: string | null) => {
   if (normalized.includes("mirasoles")) return "colegio mirasoles";
   if (normalized.includes("portezuelo")) return "colegio portezuelo";
   if (normalized.includes("candiles")) return "los candiles";
-  if (normalized.includes("colegio crisol")) return "colegio crisol";
 
   if (normalized.includes("jardin") && normalized.includes("crisol")) return "jardin crisol";
+  if (normalized.includes("colegio crisol")) return "colegio crisol";
   if (normalized.includes("jardin") && normalized.includes("torreon")) return "jardin torreon de los rios";
   if (normalized.includes("torreon de los rios")) return "jardin torreon de los rios";
   if (normalized.includes("buen molino")) return "jardin buen molino";
@@ -1217,6 +1218,7 @@ type DirectorDashboardProps = {
   projectId?: string;
   currentProjectName?: string;
   npsLoading?: boolean;
+  isPoleDirector?: boolean;
 };
 
 export default function DirectorDashboard({
@@ -1237,6 +1239,7 @@ export default function DirectorDashboard({
   projectId,
   currentProjectName,
   npsLoading = false,
+  isPoleDirector = false,
 }: DirectorDashboardProps) {
   const [npsViewMode, setNpsViewMode] = useState<"polo" | "historico">("polo");
   const [commentTheme, setCommentTheme] = useState<string>("Todos");
@@ -1247,6 +1250,7 @@ export default function DirectorDashboard({
   const [themesHydrated, setThemesHydrated] = useState(false);
   const [themesSyncing, setThemesSyncing] = useState(false);
   const [themesSyncMessage, setThemesSyncMessage] = useState("");
+  const [copyVarones2025Loading, setCopyVarones2025Loading] = useState(false);
   const lastSavedThemesKeyRef = useRef<string>("");
   const skipNextThemeSaveRef = useRef(false);
   const [isCreatingTheme, setIsCreatingTheme] = useState(false);
@@ -1930,6 +1934,60 @@ export default function DirectorDashboard({
   // el botón "Sincronizar ahora".
 
 
+  const copyVarones2025ThemesToDirector = async () => {
+    if (!canEditThemes || !projectId || copyVarones2025Loading) return;
+
+    const confirmed = window.confirm(
+      "Esto va a reemplazar las categorías de este proyecto con las categorías de Varones 2025.\n\nUsalo solo para corregir Mujeres 2025. ¿Confirmás?"
+    );
+
+    if (!confirmed) return;
+
+    setCopyVarones2025Loading(true);
+    setThemesSyncMessage("Buscando Varones 2025...");
+
+    try {
+      const projectsResult = await listarProyectosDB();
+      const projects = Array.isArray(projectsResult) ? projectsResult : (projectsResult as any)?.rows || [];
+      const sourceProject = projects.find((project: any) => {
+        const name = normalize(String(project?.nombre || ""));
+        return name.includes("varon") && name.includes("2025");
+      });
+
+      if (!sourceProject?.id) {
+        setThemesSyncMessage("No encontré el proyecto Varones 2025 para copiar categorías.");
+        return;
+      }
+
+      const result = await copiarTemasDesdeProyectoDB(projectId, String(sourceProject.id));
+      const normalized = cleanThemes((result as any)?.themes);
+
+      if (normalized.length === 0) {
+        setThemesSyncMessage("Varones 2025 no tiene categorías guardadas para copiar.");
+        return;
+      }
+
+      lastSavedThemesKeyRef.current = themesKey(normalized);
+      skipNextThemeSaveRef.current = true;
+      setAllThemes(normalized);
+
+      if (typeof window !== "undefined") {
+        try {
+          window.sessionStorage.removeItem(`apdes:action:director-themes:${projectId}`);
+          window.sessionStorage.removeItem(`apdes:action:team-config:${projectId}`);
+        } catch {
+          // Cache opcional: no bloquea la copia.
+        }
+      }
+
+      setThemesSyncMessage("Categorías copiadas desde Varones 2025 en este proyecto. Si estabas viendo Equipo, tocá Sincronizar ahora ahí también.");
+    } catch (error: any) {
+      setThemesSyncMessage(error?.message || "No se pudieron copiar las categorías desde Varones 2025.");
+    } finally {
+      setCopyVarones2025Loading(false);
+    }
+  };
+
   const syncThemesNow = () => {
     if (!projectId) return;
     setThemesSyncing(true);
@@ -2099,7 +2157,7 @@ export default function DirectorDashboard({
 
     rankingRows.forEach((r: SurveyRow) => {
       const schoolLabel = canonicalNpsSchoolName(String(r.colegio || "Sin Colegio"));
-      const key = schoolKey(schoolLabel) || "sin colegio";
+      const key = normalizeSchoolForCompare(schoolLabel) || schoolKey(schoolLabel) || "sin colegio";
       if (!labelByKey[key]) labelByKey[key] = schoolLabel;
 
       if (!map[key]) map[key] = { total: 0, promoters: 0, detractors: 0, polo: String(r.polo || "Sin polo") };
@@ -2130,6 +2188,34 @@ export default function DirectorDashboard({
         })
       : rows;
   }, [stats.schoolData, regionalRows, activeSchool, npsViewMode, ownSchool, ownPolo, fixedPolo, currentYear, activeSchoolPolo, currentProjectName, projectId]);
+
+  const npsHighlightedSchool = useMemo(() => {
+    if (activeSchool !== "Todos los colegios") return activeSchool;
+    return ownSchool || "";
+  }, [activeSchool, ownSchool]);
+
+  const getNpsBarColor = (entry: any) => {
+    if (npsViewMode === "historico") return "#1D4ED8";
+
+    // Admin / Equipo en vista general: semáforo por valor de NPS.
+    // Verde: 50 o más · Azul: 0 a 49 · Rojo: negativo.
+    const isGeneralAdminView = canEditThemes && activeSchool === "Todos los colegios" && !ownSchool && !isPoleDirector;
+    if (isGeneralAdminView) {
+      return Number(entry?.nps || 0) >= 50
+        ? "#10B981"
+        : Number(entry?.nps || 0) >= 0
+          ? "#3B82F6"
+          : "#EF4444";
+    }
+
+    // Director / Director de Polo con colegio seleccionado:
+    // el colegio donde estás parado queda azul; el resto amarillo.
+    if (npsHighlightedSchool && matchesSchoolName(entry?.name, npsHighlightedSchool)) {
+      return "#1D4ED8";
+    }
+
+    return "#F59E0B";
+  };
 
   const topPositives = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -2575,8 +2661,8 @@ export default function DirectorDashboard({
                 <h3 className="font-display text-base font-black text-slate-900">NPS comparado</h3>
                 <p className="text-[10px] font-medium text-slate-400">
                   {npsViewMode === "polo"
-                    ? "Tu colegio + red de tu polo."
-                    : activeSchool === "Todos los colegios" ? "Proyecto comparado por año." : "Tu colegio comparado por año."}
+                    ? `NPS comparativo del polo ${activeSchoolPolo || ownPolo || fixedPolo || "seleccionado"}.`
+                    : "Histórico comparativo por año."}
                 </p>
               </div>
             </div>
@@ -2616,17 +2702,7 @@ export default function DirectorDashboard({
                     {regionalData.map((entry, index) => (
                       <Cell
                         key={`cell-${index}`}
-                        fill={
-                          ownSchool && matchesSchoolName(entry.name, ownSchool)
-                            ? "#1D4ED8"
-                            : ownPolo && matchesPoloName(entry.polo, ownPolo)
-                              ? "#7C3AED"
-                              : entry.nps >= 50
-                                ? "#10B981"
-                                : entry.nps >= 0
-                                  ? "#3B82F6"
-                                  : "#EF4444"
-                        }
+                        fill={getNpsBarColor(entry)}
                       />
                     ))}
                   </Bar>
@@ -2812,6 +2888,13 @@ export default function DirectorDashboard({
                 </div>
                 {canEditThemes && (
                   <div className="flex items-center gap-2">
+                    <button
+                      onClick={copyVarones2025ThemesToDirector}
+                      disabled={!projectId || copyVarones2025Loading}
+                      className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] font-black text-amber-700 transition-colors hover:bg-amber-100 disabled:cursor-wait disabled:opacity-60"
+                    >
+                      {copyVarones2025Loading ? "Copiando..." : "Copiar Varones 2025"}
+                    </button>
                     <button
                       onClick={() => setIsCreatingTheme((prev) => !prev)}
                       className="flex items-center gap-1 rounded-xl border border-dashed border-blue-300 bg-blue-50 px-3 py-2 text-[11px] font-black text-blue-700 transition-colors hover:bg-blue-100"
